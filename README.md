@@ -1,42 +1,23 @@
 # CarbonAI-Private v2.0
 
-A private AI chatbot with custom authentication, persistent serverless SQLite, Backblaze B2 storage, intelligent AI routing, web search, voice features, memory, and themes.
+A private AI chatbot with custom authentication, persistent serverless storage on Backblaze B2, intelligent AI routing, web search, voice features, memory, and themes.
 
 ## Production architecture
 
 | Component | Technology |
 |---|---|
 | Hosting | Vercel / Next.js |
+| Persistence | Backblaze B2 JSON objects |
 | Auth | Custom JWT + HTTP-only cookie |
-| Database | Turso Cloud / libSQL |
 | File storage | Backblaze B2 |
 | AI routing | Gemini → Groq → OpenRouter with failover |
 | Frontend | Next.js 14 + Tailwind CSS + TypeScript |
 
-### Why Turso
-
-CarbonAI originally used a local `better-sqlite3` file. That is not a safe persistence layer for Vercel serverless deployments because the local filesystem is not the application's durable database.
-
-CarbonAI now uses the `libsql` Node driver, which keeps the existing SQLite-style SQL API while connecting to a remote Turso database when `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` are present. For local development without those variables, CarbonAI falls back to `data/carbonai.db`.
+CarbonAI intentionally uses **no separate database service**. User records, chats, messages, memories, and attachment metadata are stored as private JSON objects in Backblaze B2. Uploaded files are also stored in the same private B2 bucket.
 
 ## Vercel setup
 
-### 1. Connect Turso to Vercel
-
-Open your Vercel project and go to **Marketplace → Turso Cloud → Add Integration**. Connect it to the CarbonAI project.
-
-The integration provides these environment variables:
-
-```text
-TURSO_DATABASE_URL
-TURSO_AUTH_TOKEN
-```
-
-Do not commit either value to GitHub.
-
-### 2. Add your existing CarbonAI environment variables
-
-Keep the existing AI, B2, SMTP, registration-access, and JWT variables you already use:
+The application requires only the existing server-side credentials below. There are no Turso, Neon, Supabase database, Firebase, or other database-service variables.
 
 ```text
 JWT_SECRET=<long random secret>
@@ -59,50 +40,56 @@ SMTP_PASS=<optional>
 SMTP_FROM=<optional>
 ```
 
-### 3. Redeploy
+Do not commit secrets to GitHub.
 
-After connecting Turso and adding the environment variables, trigger a fresh Vercel deployment. The first database request automatically creates the CarbonAI tables.
+## Deploy
 
-### 4. Verify the deployment
+Connect the GitHub repository to Vercel and deploy the `main` branch.
 
-Open:
+After deployment, open:
 
 ```text
 https://YOUR-DOMAIN/api/health
 ```
 
-A working deployment should report:
+A working deployment should report `status: healthy` and `storage: healthy` when at least one AI provider is healthy and B2 is reachable.
 
-```json
-{
-  "status": "healthy",
-  "database": "healthy"
-}
+## Data layout
+
+CarbonAI stores data under a private `carbonai/v1/` prefix in the B2 bucket:
+
+```text
+carbonai/v1/
+├── users/<user-id>.json
+├── email-index/<sha256-email>.json
+└── users/<user-id>/
+    ├── chats/<chat-id>.json
+    ├── messages/<chat-id>/<message-id>.json
+    ├── memories/<memory-id>.json
+    └── attachments/<attachment-id>.json
 ```
 
-If `database` is `unavailable`, check that the Turso integration is connected to the correct Vercel project and that the production environment contains `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+Uploaded files remain in the existing private B2 file layout.
 
 ## Local development
 
-You can continue developing without Turso:
+Run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-When Turso variables are absent, CarbonAI uses `data/carbonai.db` locally. The local database is ignored by Git.
-
-To test against the same cloud database locally, add the Turso variables to `.env.local`.
+Local development still uses the same B2 configuration, so the application behaves like production instead of relying on a machine-local SQLite database.
 
 ## Security notes
 
 - Passwords use salted PBKDF2-SHA512 hashing.
 - Auth tokens are stored in HTTP-only cookies.
 - API keys stay server-side.
-- Backblaze B2 is used as private object storage.
-- Database access is server-side only.
-- Account deletion removes database records and associated B2 files.
+- The B2 bucket should remain private.
+- User data is isolated by authenticated user ID and object prefixes.
+- Account deletion removes stored user records and associated uploaded files.
 
 ## API routes
 
@@ -122,11 +109,11 @@ To test against the same cloud database locally, add the Turso variables to `.en
 | `/api/chat/delete` | DELETE | Delete chat |
 | `/api/upload` | POST/GET | Upload/download files |
 | `/api/search` | POST | Web search |
-| `/api/health` | GET | Check AI provider and database health |
+| `/api/health` | GET | Check AI provider and B2 storage health |
 
 ## Important migration note
 
-The old local SQLite database files that were tracked in the repository have been removed. Existing Vercel `/tmp` database state is not durable and should not be treated as production data. Create/use the new Turso database as the production source of truth.
+CarbonAI no longer depends on a local SQLite database or a third-party database provider. Existing Vercel `/tmp` database state is not durable; new deployments use Backblaze B2 as the persistent source of truth.
 
 ## License
 
