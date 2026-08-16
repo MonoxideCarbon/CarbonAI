@@ -11,8 +11,8 @@ export async function POST(req: NextRequest) {
     if (!email || !password) return NextResponse.json({ error: 'Email and password required' }, { status: 400 })
 
     const user = await getUserByEmail(email)
-    if (!user) return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
-    if (!(await verifyPassword(password, user.password_hash))) return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
+    if (!user) return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 })
+    if (!(await verifyPassword(password, user.password_hash))) return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 })
 
     const token = await createToken(user.id, user.email)
     const response = NextResponse.json({
@@ -27,8 +27,12 @@ export async function POST(req: NextRequest) {
     })
     response.cookies.set({ name: 'auth_token', value: token, httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 30 * 24 * 60 * 60 })
     return response
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error('[auth/login]', error)
+    const message = String(error?.message || '')
+    if (message.includes('B2') || message.includes('Backblaze')) {
+      return NextResponse.json({ error: 'Authentication storage is temporarily unavailable. Please try again.' }, { status: 503 })
+    }
     return NextResponse.json({ error: 'Login failed. Please try again.' }, { status: 500 })
   }
 }
