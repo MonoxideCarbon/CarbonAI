@@ -1,33 +1,43 @@
-import type Database from 'better-sqlite3'
+import Database from 'libsql'
 
-let db: Database.Database | null = null
+let db: any = null
+let initialized = false
 
-export function getDb(): Database.Database {
+export function getDb(): any {
   if (db) return db
 
   if (process.env.NEXT_RUNTIME === 'edge') {
-    throw new Error('SQLite database is not supported in Edge Runtime.')
+    throw new Error('Database is not supported in Edge Runtime.')
   }
 
-  const DatabaseDriver = require('better-sqlite3')
-  const path = require('path')
-  const fs = require('fs')
+  const tursoUrl = process.env.TURSO_DATABASE_URL?.trim()
+  const tursoToken = process.env.TURSO_AUTH_TOKEN?.trim()
 
-  const defaultDbPath = process.env.VERCEL ? '/tmp/carbonai.db' : path.join(process.cwd(), 'data', 'carbonai.db')
-  const DB_PATH = process.env.DATABASE_PATH || defaultDbPath
-  const dir = path.dirname(DB_PATH)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  if (process.env.VERCEL && (!tursoUrl || !tursoToken)) {
+    throw new Error('Turso database is not configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Vercel.')
+  }
 
-  db = new DatabaseDriver(DB_PATH) as Database.Database
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
+  if (tursoUrl) {
+    db = new Database(tursoUrl, { authToken: tursoToken })
+  } else {
+    // Local development fallback. This keeps the project runnable without a Turso account.
+    const path = require('path')
+    const fs = require('fs')
+    const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'carbonai.db')
+    const dir = path.dirname(DB_PATH)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    db = new Database(DB_PATH)
+    try { db.pragma('journal_mode = WAL') } catch {}
+  }
 
+  try { db.pragma('foreign_keys = ON') } catch {}
   initTables()
   return db
 }
 
 function initTables() {
-  const database = getDb()
+  if (initialized) return
+  const database = db || getDb()
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -117,6 +127,8 @@ function initTables() {
     CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id);
     CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
   `)
+
+  initialized = true
 }
 
 export function queryOne<T>(sql: string, params?: any[]): T | undefined {
@@ -127,6 +139,6 @@ export function queryAll<T>(sql: string, params?: any[]): T[] {
   return getDb().prepare(sql).all(...(params || [])) as T[]
 }
 
-export function runQuery(sql: string, params?: any[]): Database.RunResult {
+export function runQuery(sql: string, params?: any[]): any {
   return getDb().prepare(sql).run(...(params || []))
 }
