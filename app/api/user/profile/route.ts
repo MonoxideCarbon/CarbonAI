@@ -7,9 +7,12 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireAuth(req)
     const updates = await req.json()
-    updateUser(user.id, updates)
-    return NextResponse.json({ message: 'Updated' })
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const updated = await updateUser(user.id, updates)
+    if (!updated) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    return NextResponse.json({ message: 'Updated', user: updated })
+  } catch (error: any) {
+    if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    console.error('[user/profile]', error)
+    return NextResponse.json({ error: 'Unable to update profile.' }, { status: 500 })
   }
 }
