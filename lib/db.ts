@@ -298,6 +298,15 @@ export async function findAttachmentByStoragePath(userId: string, storagePath: s
   return data || undefined
 }
 
+export async function downloadAttachment(userId: string, storagePath: string): Promise<{ data: Buffer; contentType: string }> {
+  const attachment = await findAttachmentByStoragePath(userId, storagePath)
+  if (!attachment) throw new Error('Attachment not found')
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.storage.from(getSupabaseBucket()).download(storagePath)
+  if (error || !data) throw new Error(`Supabase attachment download failed: ${error?.message || 'empty response'}`)
+  return { data: Buffer.from(await data.arrayBuffer()), contentType: attachment.file_type || 'application/octet-stream' }
+}
+
 export async function exportUserData(userId: string): Promise<{ chats: Chat[]; messages: Message[]; memories: Memory[] }> {
   const [chats, messages, memories] = await Promise.all([listChats(userId), getAllMessages(userId), listMemories(userId)])
   return { chats, messages, memories }
