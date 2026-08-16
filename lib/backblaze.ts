@@ -8,8 +8,16 @@ interface B2Auth {
 
 let authCache: { auth: B2Auth; expires: number } | null = null
 
-async function getAuth(): Promise<B2Auth> {
-  if (authCache && Date.now() < authCache.expires) return authCache.auth
+function encodeB2Path(fileName: string): string {
+  return fileName.split('/').map(segment => encodeURIComponent(segment)).join('/')
+}
+
+function invalidateAuth() {
+  authCache = null
+}
+
+async function getAuth(forceRefresh = false): Promise<B2Auth> {
+  if (!forceRefresh && authCache && Date.now() < authCache.expires) return authCache.auth
 
   const keyId = process.env.B2_KEY_ID!
   const appKey = process.env.B2_APPLICATION_KEY!
@@ -86,13 +94,24 @@ export async function uploadJson<T>(fileName: string, value: T): Promise<{ fileI
 }
 
 export async function deleteFile(fileId: string, fileName: string): Promise<void> {
-  const auth = await getAuth()
-  const res = await fetch(`${auth.apiUrl}/b2api/v2/b2_delete_file_version`, {
+  let auth = await getAuth()
+  let res = await fetch(`${auth.apiUrl}/b2api/v2/b2_delete_file_version`, {
     method: 'POST',
     headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fileId, fileName }),
     cache: 'no-store',
   })
+
+  if (res.status === 401) {
+    invalidateAuth()
+    auth = await getAuth(true)
+    res = await fetch(`${auth.apiUrl}/b2api/v2/b2_delete_file_version`, {
+      method: 'POST',
+      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId, fileName }),
+      cache: 'no-store',
+    })
+  }
 
   if (!res.ok) throw new Error(`Failed to delete file from B2 (${res.status})`)
 }
@@ -104,7 +123,7 @@ export async function deleteLatestFile(fileName: string): Promise<void> {
 }
 
 export async function listFiles(prefix: string = '', maxFileCount: number = 1000): Promise<Array<{ fileId: string; fileName: string; size: number; uploadTimestamp: number }>> {
-  const auth = await getAuth()
+  let auth = await getAuth()
   const bucketId = process.env.B2_BUCKET_ID
   if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
 
@@ -112,7 +131,7 @@ export async function listFiles(prefix: string = '', maxFileCount: number = 1000
   let startFileName: string | undefined
 
   while (files.length < maxFileCount) {
-    const res = await fetch(`${auth.apiUrl}/b2api/v2/b2_list_file_names`, {
+    let res = await fetch(`${auth.apiUrl}/b2api/v2/b2_list_file_names`, {
       method: 'POST',
       headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -123,6 +142,22 @@ export async function listFiles(prefix: string = '', maxFileCount: number = 1000
       }),
       cache: 'no-store',
     })
+
+    if (res.status === 401) {
+      invalidateAuth()
+      auth = await getAuth(true)
+      res = await fetch(`${auth.apiUrl}/b2api/v2/b2_list_file_names`, {
+        method: 'POST',
+        headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bucketId,
+          prefix,
+          maxFileCount: Math.min(1000, maxFileCount - files.length),
+          ...(startFileName ? { startFileName } : {}),
+        }),
+        cache: 'no-store',
+      })
+    }
 
     if (!res.ok) throw new Error(`B2 list failed (${res.status})`)
     const data = await res.json()
@@ -145,7 +180,7 @@ export async function getDownloadUrl(fileName: string): Promise<string> {
   const auth = await getAuth()
   const bucketName = process.env.B2_BUCKET_NAME
   if (!bucketName) throw new Error('B2_BUCKET_NAME is not configured')
-  return `${auth.downloadUrl}/file/${bucketName}/${encodeURIComponent(fileName)}`
+  return `${auth.downloadUrl}/file/${bucketName}/${encodeB2Path(fileName)}`
 }
 
 export async function getSignedDownloadUrl(fileName: string, duration: number = 3600): Promise<string> {
@@ -154,15 +189,24 @@ export async function getSignedDownloadUrl(fileName: string, duration: number = 
 }
 
 export async function downloadFile(fileName: string): Promise<{ data: Buffer; contentType: string }> {
-  const auth = await getAuth()
+  let auth = await getAuth()
   const bucketName = process.env.B2_BUCKET_NAME
   if (!bucketName) throw new Error('B2_BUCKET_NAME is not configured')
-  const url = `${auth.downloadUrl}/file/${bucketName}/${encodeURIComponent(fileName)}`
+  const url = () => `${auth.downloadUrl}/file/${bucketName}/${encodeB2Path(fileName)}`
 
-  const res = await fetch(url, {
+  let res = await fetch(url(), {
     headers: { Authorization: auth.authorizationToken },
     cache: 'no-store',
   })
+
+  if (res.status === 401) {
+    invalidateAuth()
+    auth = await getAuth(true)
+    res = await fetch(url(), {
+      headers: { Authorization: auth.authorizationToken },
+      cache: 'no-store',
+    })
+  }
 
   if (!res.ok) throw new Error(`Failed to download file from B2 (${res.status})`)
   const data = Buffer.from(await res.arrayBuffer())
