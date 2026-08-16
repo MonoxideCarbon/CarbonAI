@@ -1,23 +1,39 @@
-# CarbonAI-Private v2.0
+# CarbonAI-Private
 
-A private AI chatbot with custom authentication, persistent serverless storage on Backblaze B2, intelligent AI routing, web search, voice features, memory, and themes.
+A private AI chatbot with custom authentication, persistent Backblaze B2 storage, intelligent AI routing, web search, voice features, memory, themes, and Vercel deployment support.
 
 ## Production architecture
 
 | Component | Technology |
 |---|---|
 | Hosting | Vercel / Next.js |
-| Persistence | Backblaze B2 JSON objects |
 | Auth | Custom JWT + HTTP-only cookie |
+| Persistent data | Backblaze B2 JSON objects |
 | File storage | Backblaze B2 |
 | AI routing | Gemini → Groq → OpenRouter with failover |
 | Frontend | Next.js 14 + Tailwind CSS + TypeScript |
 
-CarbonAI intentionally uses **no separate database service**. User records, chats, messages, memories, and attachment metadata are stored as private JSON objects in Backblaze B2. Uploaded files are also stored in the same private B2 bucket.
+CarbonAI deliberately does not require a separate database service. User records, chat metadata, messages, memories, and attachment metadata are stored as private JSON objects in Backblaze B2. Uploaded files are stored in the same B2 bucket.
+
+## Backblaze B2 layout
+
+```text
+carbonai/v1/
+  users/<user-id>.json
+  email-index/<sha256-email>.json
+  verification-index/<sha256-token>.json
+  reset-index/<sha256-token>.json
+  users/<user-id>/chats/<chat-id>.json
+  users/<user-id>/messages/<chat-id>/<message-id>.json
+  users/<user-id>/memories/<memory-id>.json
+  users/<user-id>/attachments/<attachment-id>.json
+```
+
+The application only accesses B2 from server-side code. Credentials are never exposed to the browser.
 
 ## Vercel setup
 
-The application requires only the existing server-side credentials below. There are no Turso, Neon, Supabase database, Firebase, or other database-service variables.
+Add these environment variables to the **Production** environment of the CarbonAI Vercel project:
 
 ```text
 JWT_SECRET=<long random secret>
@@ -28,11 +44,11 @@ B2_APPLICATION_KEY=<your B2 application key>
 B2_BUCKET_ID=<your B2 bucket id>
 B2_BUCKET_NAME=<your B2 bucket name>
 
-GEMINI_API_KEY=<your Gemini key>
-GROQ_API_KEY=<your Groq key>
-OPENROUTER_API_KEY=<your OpenRouter key>
+GEMINI_API_KEY=<optional Gemini key>
+GROQ_API_KEY=<optional Groq key>
+OPENROUTER_API_KEY=<optional OpenRouter key>
 
-SMTP_HOST=<optional>
+SMTP_HOST=<optional; used only for your existing SMTP setup>
 SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=<optional>
@@ -40,56 +56,47 @@ SMTP_PASS=<optional>
 SMTP_FROM=<optional>
 ```
 
+At least one AI provider key is required for chat generation. B2 variables are required for production persistence.
+
 Do not commit secrets to GitHub.
 
-## Deploy
+## Deployment
 
-Connect the GitHub repository to Vercel and deploy the `main` branch.
+Vercel builds the project with:
 
-After deployment, open:
+```bash
+npm run build
+```
+
+After deployment, verify:
 
 ```text
 https://YOUR-DOMAIN/api/health
 ```
 
-A working deployment should report `status: healthy` and `storage: healthy` when at least one AI provider is healthy and B2 is reachable.
+A healthy deployment reports `status: healthy` when at least one configured AI provider and B2 storage are working.
 
-## Data layout
+## Upload limit on Vercel
 
-CarbonAI stores data under a private `carbonai/v1/` prefix in the B2 bucket:
-
-```text
-carbonai/v1/
-├── users/<user-id>.json
-├── email-index/<sha256-email>.json
-└── users/<user-id>/
-    ├── chats/<chat-id>.json
-    ├── messages/<chat-id>/<message-id>.json
-    ├── memories/<memory-id>.json
-    └── attachments/<attachment-id>.json
-```
-
-Uploaded files remain in the existing private B2 file layout.
+The `/api/upload` route accepts files up to **4 MB**. This is intentionally below Vercel's serverless function request-body limit. Larger files should be rejected by the UI/API rather than producing opaque deployment/runtime failures.
 
 ## Local development
-
-Run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Local development still uses the same B2 configuration, so the application behaves like production instead of relying on a machine-local SQLite database.
+Local development uses the same B2 backend when the B2 environment variables are present. There is no local SQLite database dependency.
 
 ## Security notes
 
 - Passwords use salted PBKDF2-SHA512 hashing.
 - Auth tokens are stored in HTTP-only cookies.
+- Edge middleware verifies JWT signatures before protecting routes.
 - API keys stay server-side.
-- The B2 bucket should remain private.
-- User data is isolated by authenticated user ID and object prefixes.
-- Account deletion removes stored user records and associated uploaded files.
+- Backblaze B2 stores application data and uploaded files privately.
+- Account deletion removes application objects and associated uploaded B2 files.
 
 ## API routes
 
@@ -109,11 +116,11 @@ Local development still uses the same B2 configuration, so the application behav
 | `/api/chat/delete` | DELETE | Delete chat |
 | `/api/upload` | POST/GET | Upload/download files |
 | `/api/search` | POST | Web search |
-| `/api/health` | GET | Check AI provider and B2 storage health |
+| `/api/health` | GET | Check AI provider and B2 health |
 
 ## Important migration note
 
-CarbonAI no longer depends on a local SQLite database or a third-party database provider. Existing Vercel `/tmp` database state is not durable; new deployments use Backblaze B2 as the persistent source of truth.
+The old local SQLite/Turso implementation is no longer part of CarbonAI. Production state is stored in Backblaze B2 so Vercel serverless instances share the same persistent source of truth.
 
 ## License
 
