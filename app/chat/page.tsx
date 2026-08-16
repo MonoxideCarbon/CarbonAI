@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
 import Sidebar from '@/components/sidebar/Sidebar'
 import ModernChatInterface from '@/components/chat/ModernChatInterface'
+import LoadingMark from '@/components/ui/LoadingMark'
 import { Chat } from '@/types'
 
 export default function ChatPage() {
@@ -50,7 +51,7 @@ export default function ChatPage() {
       const data = await res.json().catch(() => null)
       if (res.status === 401) {
         const verified = await refresh()
-        if (!verified) { router.replace('/'); return }
+        if (!verified) { router.replace('/'); return [] }
         return loadChats(signal)
       }
       if (!res.ok) throw new Error(typeof data?.error === 'string' ? data.error : 'Unable to load your chats.')
@@ -120,14 +121,28 @@ export default function ChatPage() {
   }, [])
 
   if (loading) {
-    return <div className="min-h-screen grid place-items-center bg-white dark:bg-carbon-950"><div className="text-center"><div className="mx-auto mb-3 h-11 w-11 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 grid place-items-center text-white font-bold shadow-lg">C</div><div className="text-sm text-carbon-500">Verifying session…</div></div></div>
+    return <div className="fixed inset-0 grid place-items-center bg-white dark:bg-carbon-950"><LoadingMark size={48} /></div>
   }
 
-  if (!user) return null
+  if (!user) {
+    return (
+      <main className="fixed inset-0 grid place-items-center bg-white px-4 dark:bg-carbon-950">
+        <div className="flex flex-col items-center gap-5 text-center">
+          <LoadingMark size={48} />
+          {authError && (
+            <div className="max-w-md rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+              {authError}
+              <button type="button" onClick={() => void refresh()} className="ml-3 font-semibold underline underline-offset-2">Retry</button>
+            </div>
+          )}
+        </div>
+      </main>
+    )
+  }
 
   return (
     <div className="h-screen overflow-hidden flex bg-white text-carbon-900 dark:bg-carbon-950 dark:text-carbon-100">
-      <aside className="hidden md:flex h-screen w-72 flex-shrink-0 sticky top-0">
+      <aside className="hidden md:flex h-screen w-72 flex-shrink-0">
         <Sidebar chats={chats} activeChat={activeChat} onSelectChat={setActiveChat} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} />
       </aside>
 
