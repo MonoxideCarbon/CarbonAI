@@ -31,7 +31,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const requestRef = useRef<Promise<AuthUser | null> | null>(null)
   const userRef = useRef<AuthUser | null>(null)
 
   useEffect(() => {
@@ -39,52 +38,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user])
 
   const refresh = useCallback(async (): Promise<AuthUser | null> => {
-    if (requestRef.current) return requestRef.current
+    try {
+      const res = await fetch('/api/auth/me', {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      })
+      const data = await res.json().catch(() => null)
 
-    requestRef.current = (async () => {
-      try {
-        const res = await fetch('/api/auth/me', {
-          method: 'GET',
-          credentials: 'include',
-          cache: 'no-store',
-          headers: { Accept: 'application/json' },
-        })
-        const data = await res.json().catch(() => null)
-
-        if (res.ok && data?.user) {
-          const nextUser: AuthUser = {
-            id: String(data.user.id),
-            email: String(data.user.email),
-            full_name: data.user.full_name ?? null,
-            personality: data.user.personality || 'humanoid',
-            theme: data.user.theme || 'system',
-            memory_enabled: Boolean(data.user.memory_enabled),
-          }
-          setUser(nextUser)
-          setError(null)
-          return nextUser
+      if (res.ok && data?.user) {
+        const nextUser: AuthUser = {
+          id: String(data.user.id),
+          email: String(data.user.email),
+          full_name: data.user.full_name ?? null,
+          personality: data.user.personality || 'humanoid',
+          theme: data.user.theme || 'system',
+          memory_enabled: Boolean(data.user.memory_enabled),
         }
-
-        if (res.status === 401) {
-          setUser(null)
-          setError(null)
-          return null
-        }
-
-        const message = typeof data?.error === 'string' ? data.error : 'Unable to verify your session.'
-        setError(message)
-        return userRef.current
-      } catch (err) {
-        console.error('[auth/session]', err)
-        setError('Unable to reach the authentication service.')
-        return userRef.current
-      } finally {
-        setLoading(false)
-        requestRef.current = null
+        setUser(nextUser)
+        setError(null)
+        return nextUser
       }
-    })()
 
-    return requestRef.current
+      if (res.status === 401) {
+        setUser(null)
+        setError(null)
+        return null
+      }
+
+      const message = typeof data?.error === 'string' ? data.error : 'Unable to verify your session.'
+      setError(message)
+      return userRef.current
+    } catch (err) {
+      console.error('[auth/session]', err)
+      setError('Unable to reach the authentication service.')
+      return userRef.current
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   const logout = useCallback(async () => {
