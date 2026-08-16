@@ -3,11 +3,19 @@ import { deleteLatestFile, downloadJson, listFiles, uploadJson } from '@/lib/bac
 import type { Chat, Memory, Message, User } from '@/types'
 
 const ROOT = 'carbonai/v1'
+const LIST_LIMIT = 10000
+const READ_CONCURRENCY = 20
 
 function userPath(id: string) { return `${ROOT}/users/${id}.json` }
 function emailPath(email: string) {
   const normalized = email.trim().toLowerCase()
   return `${ROOT}/email-index/${crypto.createHash('sha256').update(normalized).digest('hex')}.json`
+}
+function verificationPath(token: string) {
+  return `${ROOT}/verification-index/${crypto.createHash('sha256').update(token).digest('hex')}.json`
+}
+function resetPath(token: string) {
+  return `${ROOT}/reset-index/${crypto.createHash('sha256').update(token).digest('hex')}.json`
 }
 function chatPath(userId: string, chatId: string) { return `${ROOT}/users/${userId}/chats/${chatId}.json` }
 function messagePath(userId: string, chatId: string, messageId: string) { return `${ROOT}/users/${userId}/messages/${chatId}/${messageId}.json` }
@@ -15,20 +23,26 @@ function memoryPath(userId: string, memoryId: string) { return `${ROOT}/users/${
 function attachmentPath(userId: string, attachmentId: string) { return `${ROOT}/users/${userId}/attachments/${attachmentId}.json` }
 function now() { return new Date().toISOString() }
 
-async function put<T>(path: string, value: T): Promise<void> { await uploadJson(path, value) }
+async function put<T>(path: string, value: T): Promise<void> {
+  await uploadJson(path, value)
+}
 
 async function remove(path: string): Promise<void> {
-  try { await deleteLatestFile(path) } catch (error: any) {
+  try {
+    await deleteLatestFile(path)
+  } catch (error: any) {
     if (!String(error?.message || '').includes('(404)')) throw error
   }
 }
 
 async function listJson<T>(prefix: string): Promise<T[]> {
-  const files = await listFiles(prefix, 1000)
+  const files = await listFiles(prefix, LIST_LIMIT)
   const results: T[] = []
-  for (const file of files) {
-    const value = await downloadJson<T>(file.fileName)
-    if (value) results.push(value)
+  for (let i = 0; i < files.length; i += READ_CONCURRENCY) {
+    const batch = await Promise.all(
+      files.slice(i, i + READ_CONCURRENCY).map(async (file) => downloadJson<T>(file.fileName))
+    )
+    for (const value of batch) if (value) results.push(value)
   }
   return results
 }
@@ -58,20 +72,34 @@ export async function createUser(data: { id: string; email: string; password_has
     created_at: stamp,
     updated_at: stamp,
   }
-  await put(userPath(user.id), user)
-  await put(emailPath(user.email), { userId: user.id })
+
+  try {
+    await put(userPath(user.id), user)
+    await put(emailPath(user.email), { userId: user.id })
+    if (user.verification_token) await put(verificationPath(user.verification_token), { userId: user.id })
+  } catch (error) {
+    await Promise.allSettled([
+      remove(userPath(user.id)),
+      remove(emailPath(user.email)),
+      user.verification_token ? remove(verificationPath(user.verification_token)) : Promise.resolve(),
+    ])
+    throw error
+  }
 }
 
 export async function deleteUser(userId: string): Promise<void> {
   const user = await getUserById(userId)
-  if (user) await remove(emailPath(user.email))
   const [chats, messages, memories, attachments] = await Promise.all([
     listJson<Chat>(`${ROOT}/users/${userId}/chats/`),
     listJson<Message>(`${ROOT}/users/${userId}/messages/`),
     listJson<Memory>(`${ROOT}/users/${userId}/memories/`),
     listJson<any>(`${ROOT}/users/${userId}/attachments/`),
   ])
+
   await Promise.all([
+    user ? remove(emailPath(user.email)) : Promise.resolve(),
+    user?.verification_token ? remove(verificationPath(user.verification_token)) : Promise.resolve(),
+    user?.reset_token ? remove(resetPath(user.reset_token)) : Promise.resolve(),
     ...chats.map(c => remove(chatPath(userId, c.id))),
     ...messages.map(m => remove(messagePath(userId, m.chat_id, m.id))),
     ...memories.map(m => remove(memoryPath(userId, m.id))),
@@ -84,41 +112,59 @@ export async function updateUser(userId: string, updates: Partial<User>): Promis
   const user = await getUserById(userId)
   if (!user) return undefined
   const allowed = ['full_name', 'avatar_url', 'personality', 'theme', 'memory_enabled'] as const
-  for (const key of allowed) if (key in updates) (user as any)[key] = (updates as any)[key]
+  for (const key of allowed) {
+    if (key in updates) (user as any)[key] = (updates as any)[key]
+  }
   user.updated_at = now()
   await put(userPath(userId), user)
   return user
 }
 
 export async function verifyUserEmail(token: string): Promise<boolean> {
-  const users = await listJson<User>(`${ROOT}/users/`)
-  const user = users.find(u => u.verification_token === token)
-  if (!user) return false
+  const id = await downloadJson<{ userId: string }>(verificationPath(token))
+  if (!id?.userId) return false
+  const user = await getUserById(id.userId)
+  if (!user || user.verification_token !== token) return false
   user.email_verified = 1
   delete user.verification_token
   user.updated_at = now()
-  await put(userPath(user.id), user)
+  await Promise.all([
+    put(userPath(user.id), user),
+    remove(verificationPath(token)),
+  ])
   return true
 }
 
 export async function setResetToken(email: string, token: string, expires: string): Promise<void> {
   const user = await getUserByEmail(email)
   if (!user) return
+  if (user.reset_token) await remove(resetPath(user.reset_token))
   user.reset_token = token
   user.reset_expires = expires
   user.updated_at = now()
-  await put(userPath(user.id), user)
+  await Promise.all([
+    put(userPath(user.id), user),
+    put(resetPath(token), { userId: user.id }),
+  ])
 }
 
 export async function resetPassword(token: string, passwordHash: string): Promise<boolean> {
-  const users = await listJson<User>(`${ROOT}/users/`)
-  const user = users.find(u => u.reset_token === token && !!u.reset_expires && u.reset_expires > now())
-  if (!user) return false
+  const id = await downloadJson<{ userId: string }>(resetPath(token))
+  if (!id?.userId) return false
+  const user = await getUserById(id.userId)
+  if (!user || user.reset_token !== token || !user.reset_expires || user.reset_expires <= now()) {
+    await remove(resetPath(token))
+    return false
+  }
+
   user.password_hash = passwordHash
   delete user.reset_token
   delete user.reset_expires
   user.updated_at = now()
-  await put(userPath(user.id), user)
+  await Promise.all([
+    put(userPath(user.id), user),
+    remove(resetPath(token)),
+  ])
   return true
 }
 
@@ -147,7 +193,12 @@ export async function updateChat(userId: string, chatId: string, updates: Partia
 }
 
 export async function deleteChat(userId: string, chatId: string): Promise<void> {
-  const [messages, attachments] = await Promise.all([listMessages(userId, chatId), listJson<any>(`${ROOT}/users/${userId}/attachments/` )])
+  const [chat, messages, attachments] = await Promise.all([
+    getChat(userId, chatId),
+    listMessages(userId, chatId),
+    listJson<any>(`${ROOT}/users/${userId}/attachments/`),
+  ])
+  if (!chat) return
   await Promise.all([
     remove(chatPath(userId, chatId)),
     ...messages.map(m => remove(messagePath(userId, chatId, m.id))),
@@ -195,7 +246,9 @@ export async function upsertMemory(userId: string, key: string, value: string): 
   const memories = await listMemories(userId)
   const existing = memories.find(m => m.key === key)
   const stamp = now()
-  const memory: Memory = existing ? { ...existing, value, updated_at: stamp } : { id: crypto.randomUUID(), user_id: userId, key, value, category: 'general', created_at: stamp, updated_at: stamp }
+  const memory: Memory = existing
+    ? { ...existing, value, updated_at: stamp }
+    : { id: crypto.randomUUID(), user_id: userId, key, value, category: 'general', created_at: stamp, updated_at: stamp }
   await put(memoryPath(userId, memory.id), memory)
   return memory
 }
@@ -208,16 +261,26 @@ export async function updateMemory(userId: string, memoryId: string, updates: Pa
   return memory
 }
 
-export async function deleteMemory(userId: string, memoryId: string): Promise<void> { await remove(memoryPath(userId, memoryId)) }
+export async function deleteMemory(userId: string, memoryId: string): Promise<void> {
+  await remove(memoryPath(userId, memoryId))
+}
 
 export async function deleteAllMemories(userId: string): Promise<void> {
   const memories = await listMemories(userId)
   await Promise.all(memories.map(m => remove(memoryPath(userId, m.id))))
 }
 
-export async function saveAttachment(userId: string, value: any): Promise<void> { await put(attachmentPath(userId, value.id), value) }
-export async function listAttachments(userId: string): Promise<any[]> { return listJson<any>(`${ROOT}/users/${userId}/attachments/`) }
-export async function findAttachmentByStoragePath(userId: string, storagePath: string): Promise<any | undefined> { return (await listAttachments(userId)).find(a => a.storage_path === storagePath) }
+export async function saveAttachment(userId: string, value: any): Promise<void> {
+  await put(attachmentPath(userId, value.id), value)
+}
+
+export async function listAttachments(userId: string): Promise<any[]> {
+  return listJson<any>(`${ROOT}/users/${userId}/attachments/`)
+}
+
+export async function findAttachmentByStoragePath(userId: string, storagePath: string): Promise<any | undefined> {
+  return (await listAttachments(userId)).find(a => a.storage_path === storagePath)
+}
 
 export async function exportUserData(userId: string): Promise<{ chats: Chat[]; messages: Message[]; memories: Memory[] }> {
   const [chats, messages, memories] = await Promise.all([
