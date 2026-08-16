@@ -1,144 +1,272 @@
-import Database from 'libsql'
+import crypto from 'crypto'
+import { deleteLatestFile, downloadJson, listFiles, uploadJson } from '@/lib/backblaze'
+import { Chat, Memory, Message, User } from '@/types'
 
-let db: any = null
-let initialized = false
+const ROOT = 'carbonai/v1'
 
-export function getDb(): any {
-  if (db) return db
+function userPath(id: string) { return `${ROOT}/users/${id}.json` }
+function emailPath(email: string) {
+  const normalized = email.trim().toLowerCase()
+  return `${ROOT}/email-index/${crypto.createHash('sha256').update(normalized).digest('hex')}.json`
+}
+function chatPath(userId: string, chatId: string) { return `${ROOT}/users/${userId}/chats/${chatId}.json` }
+function messagePath(userId: string, chatId: string, messageId: string) { return `${ROOT}/users/${userId}/messages/${chatId}/${messageId}.json` }
+function memoryPath(userId: string, memoryId: string) { return `${ROOT}/users/${userId}/memories/${memoryId}.json` }
+function attachmentPath(userId: string, attachmentId: string) { return `${ROOT}/users/${userId}/attachments/${attachmentId}.json` }
 
-  if (process.env.NEXT_RUNTIME === 'edge') {
-    throw new Error('Database is not supported in Edge Runtime.')
+function now() { return new Date().toISOString() }
+
+async function put<T>(path: string, value: T): Promise<void> {
+  await uploadJson(path, value)
+}
+
+async function remove(path: string): Promise<void> {
+  try { await deleteLatestFile(path) } catch (error: any) {
+    if (!String(error?.message || '').includes('(404)')) throw error
   }
+}
 
-  const tursoUrl = process.env.TURSO_DATABASE_URL?.trim()
-  const tursoToken = process.env.TURSO_AUTH_TOKEN?.trim()
-
-  if (process.env.VERCEL && (!tursoUrl || !tursoToken)) {
-    throw new Error('Turso database is not configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Vercel.')
+async function listJson<T>(prefix: string): Promise<T[]> {
+  const files = await listFiles(prefix, 1000)
+  const results: T[] = []
+  for (const file of files) {
+    const value = await downloadJson<T>(file.fileName)
+    if (value) results.push(value)
   }
+  return results
+}
 
-  if (tursoUrl) {
-    db = new Database(tursoUrl, { authToken: tursoToken })
-  } else {
-    // Local development fallback. This keeps the project runnable without a Turso account.
-    const path = require('path')
-    const fs = require('fs')
-    const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'carbonai.db')
-    const dir = path.dirname(DB_PATH)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    db = new Database(DB_PATH)
-    try { db.pragma('journal_mode = WAL') } catch {}
+// ----- Users / auth -----
+export async function getUserByEmail(email: string): Promise<User | undefined> {
+  const id = await downloadJson<{ userId: string }>(emailPath(email))
+  if (!id?.userId) return undefined
+  return getUserById(id.userId)
+}
+
+export async function getUserById(id: string): Promise<User | undefined> {
+  return (await downloadJson<User>(userPath(id))) || undefined
+}
+
+export async function createUser(data: {
+  id: string
+  email: string
+  password_hash: string
+  full_name?: string
+  verification_token?: string
+}): Promise<void> {
+  const stamp = now()
+  const user: User = {
+    id: data.id,
+    email: data.email.toLowerCase().trim(),
+    password_hash: data.password_hash,
+    full_name: data.full_name || undefined,
+    personality: 'humanoid',
+    theme: 'system',
+    memory_enabled: 1,
+    email_verified: 1,
+    verification_token: data.verification_token,
+    created_at: stamp,
+    updated_at: stamp,
   }
-
-  try { db.pragma('foreign_keys = ON') } catch {}
-  initTables()
-  return db
+  await put(userPath(user.id), user)
+  await put(emailPath(user.email), { userId: user.id })
 }
 
-function initTables() {
-  if (initialized) return
-  const database = db || getDb()
+export async function deleteUser(userId: string): Promise<void> {
+  const user = await getUserById(userId)
+  if (user) await remove(emailPath(user.email))
 
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      full_name TEXT,
-      avatar_url TEXT,
-      personality TEXT DEFAULT 'humanoid' CHECK (personality IN ('humanoid', 'professional')),
-      theme TEXT DEFAULT 'system' CHECK (theme IN ('light', 'dark', 'amoled', 'system')),
-      memory_enabled INTEGER DEFAULT 1,
-      email_verified INTEGER DEFAULT 0,
-      verification_token TEXT,
-      reset_token TEXT,
-      reset_expires TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
+  const [chats, messages, memories, attachments] = await Promise.all([
+    listJson<Chat>(`${ROOT}/users/${userId}/chats/`),
+    listJson<Message>(`${ROOT}/users/${userId}/messages/`),
+    listJson<Memory>(`${ROOT}/users/${userId}/memories/`),
+    listJson<any>(`${ROOT}/users/${userId}/attachments/`),
+  ])
 
-    CREATE TABLE IF NOT EXISTS chats (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      title TEXT DEFAULT 'New Chat',
-      pinned INTEGER DEFAULT 0,
-      archived INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
-      content TEXT NOT NULL,
-      attachments TEXT DEFAULT '[]',
-      model_used TEXT,
-      sources TEXT DEFAULT '[]',
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS memories (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      key TEXT NOT NULL,
-      value TEXT NOT NULL,
-      category TEXT DEFAULT 'general',
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(user_id, key)
-    );
-
-    CREATE TABLE IF NOT EXISTS attachments (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-      message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
-      filename TEXT NOT NULL,
-      file_type TEXT NOT NULL,
-      file_size INTEGER NOT NULL,
-      storage_path TEXT NOT NULL,
-      b2_file_id TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS provider_health (
-      id TEXT PRIMARY KEY,
-      provider TEXT NOT NULL,
-      model TEXT NOT NULL,
-      success_count INTEGER DEFAULT 0,
-      error_count INTEGER DEFAULT 0,
-      timeout_count INTEGER DEFAULT 0,
-      avg_latency_ms INTEGER DEFAULT 0,
-      last_error TEXT,
-      last_used TEXT DEFAULT (datetime('now')),
-      is_healthy INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(provider, model)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
-    CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
-    CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id);
-    CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
-  `)
-
-  initialized = true
+  await Promise.all([
+    ...chats.map(c => remove(chatPath(userId, c.id))),
+    ...messages.map(m => remove(messagePath(userId, m.chat_id, m.id))),
+    ...memories.map(m => remove(memoryPath(userId, m.id))),
+    ...attachments.map(a => remove(attachmentPath(userId, a.id))),
+    remove(userPath(userId)),
+  ])
 }
 
-export function queryOne<T>(sql: string, params?: any[]): T | undefined {
-  return getDb().prepare(sql).get(...(params || [])) as T | undefined
+export async function updateUser(userId: string, updates: Partial<User>): Promise<User | undefined> {
+  const user = await getUserById(userId)
+  if (!user) return undefined
+  const allowed = ['full_name', 'avatar_url', 'personality', 'theme', 'memory_enabled'] as const
+  for (const key of allowed) {
+    if (key in updates) (user as any)[key] = (updates as any)[key]
+  }
+  user.updated_at = now()
+  await put(userPath(userId), user)
+  return user
 }
 
-export function queryAll<T>(sql: string, params?: any[]): T[] {
-  return getDb().prepare(sql).all(...(params || [])) as T[]
+export async function verifyUserEmail(token: string): Promise<boolean> {
+  const users = await listJson<User>(`${ROOT}/users/`)
+  const user = users.find(u => u.verification_token === token)
+  if (!user) return false
+  user.email_verified = 1
+  delete user.verification_token
+  user.updated_at = now()
+  await put(userPath(user.id), user)
+  return true
 }
 
-export function runQuery(sql: string, params?: any[]): any {
-  return getDb().prepare(sql).run(...(params || []))
+export async function setResetToken(email: string, token: string, expires: string): Promise<void> {
+  const user = await getUserByEmail(email)
+  if (!user) return
+  user.reset_token = token
+  user.reset_expires = expires
+  user.updated_at = now()
+  await put(userPath(user.id), user)
+}
+
+export async function resetPassword(token: string, passwordHash: string): Promise<boolean> {
+  const users = await listJson<User>(`${ROOT}/users/`)
+  const user = users.find(u => u.reset_token === token && !!u.reset_expires && u.reset_expires > now())
+  if (!user) return false
+  user.password_hash = passwordHash
+  delete user.reset_token
+  delete user.reset_expires
+  user.updated_at = now()
+  await put(userPath(user.id), user)
+  return true
+}
+
+// ----- Chats -----
+export async function createChat(userId: string): Promise<Chat> {
+  const stamp = now()
+  const chat: Chat = { id: crypto.randomUUID(), user_id: userId, title: 'New Chat', pinned: false, archived: false, created_at: stamp, updated_at: stamp }
+  await put(chatPath(userId, chat.id), chat)
+  return chat
+}
+
+export async function getChat(userId: string, chatId: string): Promise<Chat | undefined> {
+  return (await downloadJson<Chat>(chatPath(userId, chatId))) || undefined
+}
+
+export async function listChats(userId: string): Promise<Chat[]> {
+  const chats = await listJson<Chat>(`${ROOT}/users/${userId}/chats/`)
+  return chats.filter(c => !c.archived).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at.localeCompare(a.updated_at))
+}
+
+export async function updateChat(userId: string, chatId: string, updates: Partial<Chat>): Promise<Chat | undefined> {
+  const chat = await getChat(userId, chatId)
+  if (!chat) return undefined
+  Object.assign(chat, updates, { updated_at: now() })
+  await put(chatPath(userId, chatId), chat)
+  return chat
+}
+
+export async function deleteChat(userId: string, chatId: string): Promise<void> {
+  const [messages, attachments] = await Promise.all([
+    listMessages(userId, chatId),
+    listJson<any>(`${ROOT}/users/${userId}/attachments/`),
+  ])
+  await Promise.all([
+    remove(chatPath(userId, chatId)),
+    ...messages.map(m => remove(messagePath(userId, chatId, m.id))),
+    ...attachments.filter(a => a.chat_id === chatId).map(a => remove(attachmentPath(userId, a.id))),
+  ])
+}
+
+// ----- Messages -----
+export async function listMessages(userId: string, chatId: string): Promise<Message[]> {
+  const messages = await listJson<Message>(`${ROOT}/users/${userId}/messages/${chatId}/`)
+  return messages.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+}
+
+export async function saveMessage(message: Message): Promise<void> {
+  const value: Message = {
+    ...message,
+    attachments: message.attachments || [],
+    sources: message.sources || [],
+    updated_at: message.updated_at || now(),
+    created_at: message.created_at || now(),
+  }
+  await put(messagePath(message.user_id, message.chat_id, message.id), value)
+}
+
+export async function getMessage(userId: string, chatId: string, messageId: string): Promise<Message | undefined> {
+  return (await downloadJson<Message>(messagePath(userId, chatId, messageId))) || undefined
+}
+
+export async function updateMessage(userId: string, chatId: string, messageId: string, updates: Partial<Message>): Promise<Message | undefined> {
+  const message = await getMessage(userId, chatId, messageId)
+  if (!message) return undefined
+  Object.assign(message, updates, { updated_at: now() })
+  await put(messagePath(userId, chatId, messageId), message)
+  return message
+}
+
+// ----- Memories -----
+export async function listMemories(userId: string): Promise<Memory[]> {
+  const memories = await listJson<Memory>(`${ROOT}/users/${userId}/memories/`)
+  return memories.sort((a, b) => b.created_at.localeCompare(a.created_at))
+}
+
+export async function getMemory(userId: string, memoryId: string): Promise<Memory | undefined> {
+  return (await downloadJson<Memory>(memoryPath(userId, memoryId))) || undefined
+}
+
+export async function upsertMemory(userId: string, key: string, value: string): Promise<Memory> {
+  const memories = await listMemories(userId)
+  const existing = memories.find(m => m.key === key)
+  const stamp = now()
+  const memory: Memory = existing
+    ? { ...existing, value, updated_at: stamp }
+    : { id: crypto.randomUUID(), user_id: userId, key, value, category: 'general', created_at: stamp, updated_at: stamp }
+  await put(memoryPath(userId, memory.id), memory)
+  return memory
+}
+
+export async function updateMemory(userId: string, memoryId: string, updates: Partial<Memory>): Promise<Memory | undefined> {
+  const memory = await getMemory(userId, memoryId)
+  if (!memory) return undefined
+  Object.assign(memory, updates, { updated_at: now() })
+  await put(memoryPath(userId, memoryId), memory)
+  return memory
+}
+
+export async function deleteMemory(userId: string, memoryId: string): Promise<void> {
+  await remove(memoryPath(userId, memoryId))
+}
+
+export async function deleteAllMemories(userId: string): Promise<void> {
+  const memories = await listMemories(userId)
+  await Promise.all(memories.map(m => remove(memoryPath(userId, m.id))))
+}
+
+// ----- Attachments metadata -----
+export async function saveAttachment(userId: string, value: any): Promise<void> {
+  await put(attachmentPath(userId, value.id), value)
+}
+
+export async function listAttachments(userId: string): Promise<any[]> {
+  return listJson<any>(`${ROOT}/users/${userId}/attachments/`)
+}
+
+export async function findAttachmentByStoragePath(userId: string, storagePath: string): Promise<any | undefined> {
+  const attachments = await listAttachments(userId)
+  return attachments.find(a => a.storage_path === storagePath)
+}
+
+// ----- Export / health -----
+export async function exportUserData(userId: string): Promise<{ chats: Chat[]; messages: Message[]; memories: Memory[] }> {
+  const [chats, messages, memories] = await Promise.all([
+    listJson<Chat>(`${ROOT}/users/${userId}/chats/`),
+    listJson<Message>(`${ROOT}/users/${userId}/messages/`),
+    listJson<Memory>(`${ROOT}/users/${userId}/memories/`),
+  ])
+  return { chats, messages, memories }
+}
+
+export async function getStorageHealth(): Promise<boolean> {
+  const testPath = `${ROOT}/health.json`
+  const stamp = { ok: true, updatedAt: now() }
+  await put(testPath, stamp)
+  return true
 }
