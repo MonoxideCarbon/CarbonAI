@@ -32,6 +32,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const requestRef = useRef<Promise<AuthUser | null> | null>(null)
+  const userRef = useRef<AuthUser | null>(null)
+
+  useEffect(() => {
+    userRef.current = user
+  }, [user])
 
   const refresh = useCallback(async (): Promise<AuthUser | null> => {
     if (requestRef.current) return requestRef.current
@@ -44,7 +49,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           cache: 'no-store',
           headers: { Accept: 'application/json' },
         })
-
         const data = await res.json().catch(() => null)
 
         if (res.ok && data?.user) {
@@ -67,12 +71,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return null
         }
 
-        setError(typeof data?.error === 'string' ? data.error : 'Unable to verify your session.')
-        return user
+        const message = typeof data?.error === 'string' ? data.error : 'Unable to verify your session.'
+        setError(message)
+        return userRef.current
       } catch (err) {
         console.error('[auth/session]', err)
         setError('Unable to reach the authentication service.')
-        return user
+        return userRef.current
       } finally {
         setLoading(false)
         requestRef.current = null
@@ -80,7 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })()
 
     return requestRef.current
-  }, [user])
+  }, [])
 
   const logout = useCallback(async () => {
     try {
