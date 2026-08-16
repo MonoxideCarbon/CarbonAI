@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, Mail, Lock, User, Key, ArrowRight, CheckCircle } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
@@ -18,6 +18,20 @@ export default function AuthPage() {
   const [error, setError] = useState('')
   const router = useRouter()
   const { refresh } = useAuth()
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const token = params.get('reset')
+    const verified = params.get('verified')
+
+    if (token) {
+      setResetToken(token)
+      setMode('reset-confirm')
+      setMessage('Enter a new password to finish resetting your account.')
+    } else if (verified === '1') {
+      setMessage('Your email has been verified.')
+    }
+  }, [])
 
   const responseError = async (res: Response) => {
     const data = await res.json().catch(() => null)
@@ -40,9 +54,7 @@ export default function AuthPage() {
 
     try {
       if (mode === 'signup') {
-        if (password !== confirmPassword) {
-          throw new Error('Passwords do not match')
-        }
+        if (password !== confirmPassword) throw new Error('Passwords do not match')
         const res = await fetch('/api/auth/signup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -69,9 +81,8 @@ export default function AuthPage() {
         if (!res.ok) throw new Error(await responseError(res))
         setMessage('If the email exists, a reset link has been sent.')
       } else if (mode === 'reset-confirm') {
-        if (password !== confirmPassword) {
-          throw new Error('Passwords do not match')
-        }
+        if (!resetToken) throw new Error('Reset token is missing or invalid.')
+        if (password !== confirmPassword) throw new Error('Passwords do not match')
         const res = await fetch('/api/auth/reset-confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -79,7 +90,11 @@ export default function AuthPage() {
         })
         if (!res.ok) throw new Error(await responseError(res))
         setMessage('Password updated! You can now log in.')
+        setPassword('')
+        setConfirmPassword('')
+        setResetToken('')
         setMode('login')
+        window.history.replaceState({}, '', '/')
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
@@ -120,7 +135,7 @@ export default function AuthPage() {
               <div className="relative">
                 <Key className="absolute left-3 top-3 h-5 w-5 text-carbon-400" />
                 <input type="password" placeholder="Access Key / Secret Password" value={accessKey} onChange={e => setAccessKey(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-carbon-200 dark:border-carbon-700 bg-white dark:bg-carbon-900 text-carbon-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent" required />
+                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-carbon-200 dark:border-carbon-700 bg-white dark:bg-carbon-900 text-carbon-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent" />
               </div>
             </>
           )}
