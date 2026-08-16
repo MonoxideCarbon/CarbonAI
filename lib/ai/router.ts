@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import Groq from 'groq-sdk'
 import OpenAI from 'openai'
-import { downloadFile } from '@/lib/backblaze'
+import { downloadAttachment } from '@/lib/db'
 import type { AIModel, Message, ModelCapabilities } from '@/types'
 
 let geminiClient: GoogleGenerativeAI | null = null
@@ -136,7 +136,7 @@ async function readAttachmentText(message: Message): Promise<string> {
   for (const attachment of attachments) {
     if (attachment.file_type?.startsWith('image/') || attachment.file_type === 'application/pdf') continue
     try {
-      const { data } = await downloadFile(attachment.storage_path)
+      const { data } = await downloadAttachment(message.user_id, attachment.storage_path)
       const text = data.toString('utf8').slice(0, 120_000)
       if (text.trim()) textParts.push(`\n\nAttachment: ${attachment.filename}\n${text}`)
     } catch (error) {
@@ -151,7 +151,7 @@ async function geminiParts(message: Message): Promise<any[]> {
   if (message.content) parts.push({ text: message.content })
   for (const attachment of message.attachments || []) {
     try {
-      const { data } = await downloadFile(attachment.storage_path)
+      const { data } = await downloadAttachment(message.user_id, attachment.storage_path)
       if (attachment.file_type?.startsWith('image/') || attachment.file_type === 'application/pdf') {
         parts.push({ inlineData: { mimeType: attachment.file_type || 'application/octet-stream', data: data.toString('base64') } })
       } else {
@@ -169,9 +169,7 @@ async function geminiParts(message: Message): Promise<any[]> {
 async function* generateGeminiResponse(model: AIModel, messages: Message[], systemPrompt: string, temperature: number): AsyncGenerator<string, void, unknown> {
   const genModel = getGeminiClient().getGenerativeModel({ model: model.id, systemInstruction: systemPrompt, generationConfig: { ...(model.id.startsWith('gemini-3.') ? {} : { temperature }), maxOutputTokens: 8192 } })
   const history = [] as any[]
-  for (const message of messages.slice(0, -1)) {
-    history.push({ role: message.role === 'user' ? 'user' : 'model', parts: await geminiParts(message) })
-  }
+  for (const message of messages.slice(0, -1)) history.push({ role: message.role === 'user' ? 'user' : 'model', parts: await geminiParts(message) })
   const lastMessage = messages[messages.length - 1]
   const result = await genModel.startChat({ history }).sendMessageStream(await geminiParts(lastMessage))
   for await (const chunk of result.stream) {
