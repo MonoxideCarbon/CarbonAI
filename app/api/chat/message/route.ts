@@ -12,19 +12,20 @@ export async function POST(req: NextRequest) {
     if (!msg?.id || !msg?.chat_id || !msg?.role || typeof msg?.content !== 'string') {
       return NextResponse.json({ error: 'Invalid message' }, { status: 400 })
     }
+    if (!['user', 'assistant', 'system'].includes(msg.role)) return NextResponse.json({ error: 'Invalid message role' }, { status: 400 })
     const chat = await getChat(user.id, msg.chat_id)
     if (!chat) return NextResponse.json({ error: 'Chat not found' }, { status: 404 })
 
     const message: Message = {
-      id: msg.id,
-      chat_id: msg.chat_id,
+      id: String(msg.id),
+      chat_id: String(msg.chat_id),
       user_id: user.id,
-      role: msg.role,
+      role: msg.role as Message['role'],
       content: msg.content,
       attachments: Array.isArray(msg.attachments) ? msg.attachments : [],
-      model_used: msg.model_used || undefined,
+      model_used: typeof msg.model_used === 'string' ? msg.model_used : undefined,
       sources: Array.isArray(msg.sources) ? msg.sources : [],
-      created_at: msg.created_at || new Date().toISOString(),
+      created_at: typeof msg.created_at === 'string' ? msg.created_at : new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }
     await saveMessage(message)
