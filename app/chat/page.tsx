@@ -136,8 +136,7 @@ export default function ChatPage() {
     return (
       <main className="fixed inset-0 grid place-items-center bg-white px-4 dark:bg-carbon-950">
         <div className="flex max-w-md flex-col items-center text-center">
-          <LoadingMark size={42} />
-          <p className="mt-5 text-sm text-carbon-500 dark:text-carbon-400">{authError || 'Your session could not be verified.'}</p>
+          <p className="text-sm text-carbon-500 dark:text-carbon-400">{authError || 'No active session was found.'}</p>
           <div className="mt-4 flex gap-2">
             <button type="button" onClick={() => void refresh()} className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-dark">Try again</button>
             <button type="button" onClick={() => router.replace('/')} className="rounded-xl bg-carbon-100 px-4 py-2 text-sm font-medium text-carbon-700 hover:bg-carbon-200 dark:bg-carbon-800 dark:text-carbon-200">Sign in</button>
