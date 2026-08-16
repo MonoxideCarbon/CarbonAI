@@ -104,6 +104,12 @@ const MODELS: AIModel[] = [
   },
 ]
 
+function providerConfigured(provider: AIModel['provider']): boolean {
+  if (provider === 'gemini') return Boolean(process.env.GEMINI_API_KEY?.trim())
+  if (provider === 'groq') return Boolean(process.env.GROQ_API_KEY?.trim())
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+}
+
 let modelHealthCache = new Map<string, AIModel>()
 let lastHealthRefresh = 0
 const HEALTH_REFRESH_INTERVAL = 5 * 60 * 1000
@@ -111,7 +117,11 @@ const HEALTH_REFRESH_INTERVAL = 5 * 60 * 1000
 export function getHealthCache(): Map<string, AIModel> {
   const now = Date.now()
   if (modelHealthCache.size === 0 || now - lastHealthRefresh >= HEALTH_REFRESH_INTERVAL) {
-    modelHealthCache = new Map(MODELS.map(model => [model.id, { ...model, capabilities: { ...model.capabilities } }]))
+    modelHealthCache = new Map(MODELS.map(model => [model.id, {
+      ...model,
+      isHealthy: model.isHealthy && providerConfigured(model.provider),
+      capabilities: { ...model.capabilities },
+    }]))
     lastHealthRefresh = now
   }
   return modelHealthCache
@@ -127,7 +137,7 @@ export function markModelUnhealthy(modelId: string, error?: string) {
 
 export function markModelHealthy(modelId: string, latencyMs: number) {
   const model = getHealthCache().get(modelId)
-  if (!model) return
+  if (!model || !providerConfigured(model.provider)) return
   model.isHealthy = true
   model.avgLatency = latencyMs
 }
@@ -178,8 +188,8 @@ export function getFailoverModels(primaryModel: AIModel): AIModel[] {
     .sort((a, b) => {
       const providerPenaltyA = a.provider === primaryModel.provider ? 100 : 0
       const providerPenaltyB = b.provider === primaryModel.provider ? 100 : 0
-      return (scoreModel(b, { chat: true, vision: false, reasoning: true, coding: true, documents: false, needsLargeContext: false }) - providerPenaltyB)
-        - (scoreModel(a, { chat: true, vision: false, reasoning: true, coding: true, documents: false, needsLargeContext: false }) - providerPenaltyA)
+      const baseline = { chat: true, vision: false, reasoning: true, coding: true, documents: false, needsLargeContext: false }
+      return (scoreModel(b, baseline) - providerPenaltyB) - (scoreModel(a, baseline) - providerPenaltyA)
     })
 }
 
@@ -263,7 +273,6 @@ export function buildSystemPrompt(personality: 'humanoid' | 'professional', memo
   const base = personality === 'humanoid'
     ? 'You are CarbonAI-Private, a helpful AI assistant. Be friendly, natural, concise, supportive, and human-like. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
     : 'You are CarbonAI-Private, a professional AI assistant. Be precise, direct, well-structured, and concise. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
-
   const memoryText = memories.length ? `\n\nRelevant information about the user:\n${memories.map(memory => `- ${memory.key}: ${memory.value}`).join('\n')}` : ''
   const searchText = hasSearchResults ? '\n\nUse the supplied web-search results for current claims and cite them when appropriate.' : ''
   return `${base}${memoryText}${searchText}`
