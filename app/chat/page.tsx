@@ -45,9 +45,13 @@ export default function ChatPage() {
   }, [busy, refresh, router, user])
 
   const loadChats = useCallback(async (signal?: AbortSignal) => {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 8000)
+    const linkedAbort = () => controller.abort()
+    signal?.addEventListener('abort', linkedAbort, { once: true })
     try {
       setPageError(null)
-      const res = await fetch('/api/chat/list', { credentials: 'include', cache: 'no-store', signal })
+      const res = await fetch('/api/chat/list', { credentials: 'include', cache: 'no-store', signal: controller.signal })
       const data = await res.json().catch(() => null)
       if (res.status === 401) {
         const verified = await refresh()
@@ -60,10 +64,16 @@ export default function ChatPage() {
       setActiveChat(current => current && nextChats.some((chat: Chat) => chat.id === current) ? current : nextChats[0]?.id || null)
       return nextChats as Chat[]
     } catch (err: any) {
-      if (err?.name === 'AbortError') return []
+      if (err?.name === 'AbortError') {
+        setPageError('Chat storage took too long to respond. Please retry.')
+        return []
+      }
       console.error('[chat/list]', err)
       setPageError(err?.message || 'Unable to load your chats.')
       return []
+    } finally {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', linkedAbort)
     }
   }, [refresh, router])
 
@@ -73,10 +83,10 @@ export default function ChatPage() {
     const controller = new AbortController()
     void (async () => {
       const loaded = await loadChats(controller.signal)
-      if (!controller.signal.aborted && loaded && loaded.length === 0) await createChat()
+      if (!controller.signal.aborted && loaded.length === 0 && !pageError) await createChat()
     })()
     return () => controller.abort()
-  }, [loading, user, loadChats, createChat])
+  }, [loading, user, loadChats, createChat, pageError])
 
   const deleteChat = useCallback(async (chatId: string) => {
     try {
@@ -120,21 +130,18 @@ export default function ChatPage() {
     setChats(prev => prev.map(chat => chat.id === chatId ? { ...chat, title, updated_at: new Date().toISOString() } : chat))
   }, [])
 
-  if (loading) {
-    return <div className="fixed inset-0 grid place-items-center bg-white dark:bg-carbon-950"><LoadingMark size={48} /></div>
-  }
+  if (loading) return <div className="fixed inset-0 grid place-items-center bg-white dark:bg-carbon-950"><LoadingMark size={48} /></div>
 
   if (!user) {
     return (
       <main className="fixed inset-0 grid place-items-center bg-white px-4 dark:bg-carbon-950">
-        <div className="flex flex-col items-center gap-5 text-center">
-          <LoadingMark size={48} />
-          {authError && (
-            <div className="max-w-md rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-              {authError}
-              <button type="button" onClick={() => void refresh()} className="ml-3 font-semibold underline underline-offset-2">Retry</button>
-            </div>
-          )}
+        <div className="flex max-w-md flex-col items-center text-center">
+          <LoadingMark size={42} />
+          <p className="mt-5 text-sm text-carbon-500 dark:text-carbon-400">{authError || 'Your session could not be verified.'}</p>
+          <div className="mt-4 flex gap-2">
+            <button type="button" onClick={() => void refresh()} className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-dark">Try again</button>
+            <button type="button" onClick={() => router.replace('/')} className="rounded-xl bg-carbon-100 px-4 py-2 text-sm font-medium text-carbon-700 hover:bg-carbon-200 dark:bg-carbon-800 dark:text-carbon-200">Sign in</button>
+          </div>
         </div>
       </main>
     )
@@ -142,27 +149,11 @@ export default function ChatPage() {
 
   return (
     <div className="h-screen overflow-hidden flex bg-white text-carbon-900 dark:bg-carbon-950 dark:text-carbon-100">
-      <aside className="hidden md:flex h-screen w-72 flex-shrink-0">
-        <Sidebar chats={chats} activeChat={activeChat} onSelectChat={setActiveChat} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} />
-      </aside>
-
-      {sidebarOpen && (
-        <div className="fixed inset-0 z-50 md:hidden">
-          <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />
-          <div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-2xl dark:bg-carbon-900">
-            <Sidebar chats={chats} activeChat={activeChat} onSelectChat={id => { setActiveChat(id); setSidebarOpen(false) }} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} />
-          </div>
-        </div>
-      )}
-
+      <aside className="hidden md:flex h-screen w-72 flex-shrink-0"><Sidebar chats={chats} activeChat={activeChat} onSelectChat={setActiveChat} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} /></aside>
+      {sidebarOpen && <div className="fixed inset-0 z-50 md:hidden"><div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} /><div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-2xl dark:bg-carbon-900"><Sidebar chats={chats} activeChat={activeChat} onSelectChat={id => { setActiveChat(id); setSidebarOpen(false) }} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} /></div></div>}
       <main className="relative flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
         {authError && <div className="absolute left-4 right-4 top-3 z-40 rounded-2xl border border-amber-200 bg-amber-50/95 px-4 py-3 text-sm text-amber-800 shadow-lg backdrop-blur dark:border-amber-900/60 dark:bg-amber-950/90 dark:text-amber-200">{authError}</div>}
-        {pageError && (
-          <div className="absolute left-4 right-4 top-3 z-40 flex items-center justify-between gap-4 rounded-2xl border border-red-200 bg-red-50/95 px-4 py-3 text-sm text-red-700 shadow-lg backdrop-blur dark:border-red-900/60 dark:bg-red-950/90 dark:text-red-200">
-            <span className="min-w-0 truncate">{pageError}</span>
-            <div className="flex shrink-0 gap-2"><button onClick={() => void loadChats()} className="rounded-xl px-3 py-1.5 font-medium hover:bg-red-100 dark:hover:bg-red-900/30">Retry</button><button onClick={() => setPageError(null)} className="rounded-xl px-2 py-1 hover:bg-red-100 dark:hover:bg-red-900/30">Dismiss</button></div>
-          </div>
-        )}
+        {pageError && <div className="absolute left-4 right-4 top-3 z-40 flex items-center justify-between gap-4 rounded-2xl border border-red-200 bg-red-50/95 px-4 py-3 text-sm text-red-700 shadow-lg backdrop-blur dark:border-red-900/60 dark:bg-red-950/90 dark:text-red-200"><span className="min-w-0 truncate">{pageError}</span><div className="flex shrink-0 gap-2"><button onClick={() => void loadChats()} className="rounded-xl px-3 py-1.5 font-medium hover:bg-red-100 dark:hover:bg-red-900/30">Retry</button><button onClick={() => setPageError(null)} className="rounded-xl px-2 py-1 hover:bg-red-100 dark:hover:bg-red-900/30">Dismiss</button></div></div>}
         <ModernChatInterface chatId={activeChat} onCreateChat={() => void createChat()} onOpenSidebar={() => setSidebarOpen(true)} onTitleChange={handleTitleChange} user={user} />
       </main>
     </div>
