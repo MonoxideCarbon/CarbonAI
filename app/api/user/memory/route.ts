@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth'
-import { runQuery, queryOne } from '@/lib/db'
+import { deleteMemory, updateMemory, upsertMemory } from '@/lib/db'
 
 export const runtime = 'nodejs'
 
@@ -8,11 +8,17 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireAuth(req)
     const { id, key, value } = await req.json()
-    if (key !== undefined) runQuery('UPDATE memories SET key = ? WHERE id = ? AND user_id = ?', [key, id, user.id])
-    if (value !== undefined) runQuery('UPDATE memories SET value = ? WHERE id = ? AND user_id = ?', [value, id, user.id])
-    return NextResponse.json({ message: 'Updated' })
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!id && typeof key === 'string' && typeof value === 'string') {
+      return NextResponse.json({ memory: await upsertMemory(user.id, key.trim(), value) })
+    }
+    if (!id) return NextResponse.json({ error: 'Memory ID required' }, { status: 400 })
+    const memory = await updateMemory(user.id, id, { ...(key !== undefined ? { key } : {}), ...(value !== undefined ? { value } : {}) })
+    if (!memory) return NextResponse.json({ error: 'Memory not found' }, { status: 404 })
+    return NextResponse.json({ message: 'Updated', memory })
+  } catch (error: any) {
+    if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    console.error('[user/memory]', error)
+    return NextResponse.json({ error: 'Unable to update memory.' }, { status: 500 })
   }
 }
 
@@ -20,12 +26,12 @@ export async function PUT(req: NextRequest) {
   try {
     const user = await requireAuth(req)
     const { key, value } = await req.json()
-    const id = crypto.randomUUID()
-    runQuery('INSERT OR REPLACE INTO memories (id, user_id, key, value) VALUES (?, ?, ?, ?)', [id, user.id, key, value])
-    const memory = queryOne('SELECT * FROM memories WHERE id = ?', [id])
-    return NextResponse.json({ memory })
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (typeof key !== 'string' || typeof value !== 'string' || !key.trim()) return NextResponse.json({ error: 'Key and value required' }, { status: 400 })
+    return NextResponse.json({ memory: await upsertMemory(user.id, key.trim(), value) })
+  } catch (error: any) {
+    if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    console.error('[user/memory]', error)
+    return NextResponse.json({ error: 'Unable to save memory.' }, { status: 500 })
   }
 }
 
@@ -34,9 +40,11 @@ export async function DELETE(req: NextRequest) {
     const user = await requireAuth(req)
     const id = req.nextUrl.searchParams.get('id')
     if (!id) return NextResponse.json({ error: 'ID required' }, { status: 400 })
-    runQuery('DELETE FROM memories WHERE id = ? AND user_id = ?', [id, user.id])
+    await deleteMemory(user.id, id)
     return NextResponse.json({ message: 'Deleted' })
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  } catch (error: any) {
+    if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    console.error('[user/memory]', error)
+    return NextResponse.json({ error: 'Unable to delete memory.' }, { status: 500 })
   }
 }
