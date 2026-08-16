@@ -13,12 +13,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid user message' }, { status: 400 })
     }
 
-    const chat = await getChat(user.id, String(msg.chat_id))
+    const chatId = String(msg.chat_id)
+    const chat = await getChat(user.id, chatId)
     if (!chat) return NextResponse.json({ error: 'Chat not found' }, { status: 404 })
 
     const message: Message = {
       id: String(msg.id),
-      chat_id: String(msg.chat_id),
+      chat_id: chatId,
       user_id: user.id,
       role: 'user',
       content: msg.content,
@@ -30,11 +31,11 @@ export async function POST(req: NextRequest) {
     }
 
     await saveMessage(message)
-    await updateChat(user.id, message.chat_id, {})
-    return NextResponse.json({ message: 'Saved' })
+    await updateChat(user.id, chatId, {})
+    return NextResponse.json({ message: 'Saved', owner: user.id, chatId })
   } catch (error: any) {
     if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     console.error('[chat/message]', error)
-    return NextResponse.json({ error: 'Unable to save message.' }, { status: 500 })
+    return NextResponse.json({ error: error?.message || 'Unable to save message.' }, { status: 500 })
   }
 }
