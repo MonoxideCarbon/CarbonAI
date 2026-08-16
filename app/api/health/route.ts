@@ -14,7 +14,7 @@ export async function GET() {
     await getStorageHealth()
   } catch (error) {
     storage = 'unavailable'
-    storageError = process.env.NODE_ENV === 'development' ? (error instanceof Error ? error.message : String(error)) : 'Backblaze storage unavailable'
+    storageError = process.env.NODE_ENV === 'development' ? (error instanceof Error ? error.message : String(error)) : 'Supabase storage/database unavailable'
   }
 
   const status = healthyModels.length > 0 && storage === 'healthy' ? 'healthy' : 'degraded'
