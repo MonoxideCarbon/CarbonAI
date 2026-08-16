@@ -32,8 +32,7 @@ export default function ChatPage() {
           router.replace('/')
           return
         }
-        await loadChats(signal)
-        return
+        return loadChats(signal)
       }
 
       if (!res.ok) {
@@ -203,7 +202,7 @@ export default function ChatPage() {
           <div className="mx-4 mt-4 flex items-center justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">
             <span>{pageError}</span>
             <div className="flex gap-2">
-              <button onClick={() => void loadChats()} className="rounded-lg px-3 py-1.5 font-medium hover:bg-red-100 dark:hover:bg-red-900/30">Retry</button>
+              <button onClick={() => void loadChats()} disabled={busy} className="rounded-lg px-3 py-1.5 font-medium hover:bg-red-100 disabled:opacity-50 dark:hover:bg-red-900/30">Retry</button>
               <button onClick={() => setPageError(null)} className="rounded-lg px-2 py-1 hover:bg-red-100 dark:hover:bg-red-900/30">Dismiss</button>
             </div>
           </div>
@@ -213,7 +212,6 @@ export default function ChatPage() {
           onCreateChat={createChat}
           onOpenSidebar={() => setSidebarOpen(true)}
           user={user}
-          disabled={busy}
         />
       </div>
     </div>
