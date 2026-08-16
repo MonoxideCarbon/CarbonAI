@@ -30,9 +30,9 @@ export async function POST(req: NextRequest) {
       updated_at: new Date().toISOString(),
     }
 
-    const saved = await saveMessage(message)
+    await saveMessage(message)
     await updateChat(user.id, chatId, {})
-    return NextResponse.json({ message: 'Saved', owner: user.id, chatId, id: saved.id })
+    return NextResponse.json({ message: 'Saved', owner: user.id, chatId, id: message.id })
   } catch (error: any) {
     if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     console.error('[chat/message]', error)
