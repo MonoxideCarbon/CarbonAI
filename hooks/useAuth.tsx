@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, createContext, useContext, ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, createContext, useContext, ReactNode } from 'react'
 
 interface AuthUser {
   id: string
@@ -14,49 +14,96 @@ interface AuthUser {
 interface AuthContextType {
   user: AuthUser | null
   loading: boolean
-  refresh: () => Promise<void>
+  error: string | null
+  refresh: () => Promise<AuthUser | null>
   logout: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   loading: true,
-  refresh: async () => {},
+  error: null,
+  refresh: async () => null,
   logout: async () => {},
 })
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const requestRef = useRef<Promise<AuthUser | null> | null>(null)
 
-  const refresh = async () => {
-    try {
-      const res = await fetch('/api/auth/me', { credentials: 'include' })
-      if (res.ok) {
-        const data = await res.json()
-        setUser(data.user)
-      } else {
-        setUser(null)
+  const refresh = useCallback(async (): Promise<AuthUser | null> => {
+    if (requestRef.current) return requestRef.current
+
+    requestRef.current = (async () => {
+      try {
+        const res = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        })
+
+        const data = await res.json().catch(() => null)
+
+        if (res.ok && data?.user) {
+          const nextUser: AuthUser = {
+            id: String(data.user.id),
+            email: String(data.user.email),
+            full_name: data.user.full_name ?? null,
+            personality: data.user.personality || 'humanoid',
+            theme: data.user.theme || 'system',
+            memory_enabled: Boolean(data.user.memory_enabled),
+          }
+          setUser(nextUser)
+          setError(null)
+          return nextUser
+        }
+
+        if (res.status === 401) {
+          setUser(null)
+          setError(null)
+          return null
+        }
+
+        setError(typeof data?.error === 'string' ? data.error : 'Unable to verify your session.')
+        return user
+      } catch (err) {
+        console.error('[auth/session]', err)
+        setError('Unable to reach the authentication service.')
+        return user
+      } finally {
+        setLoading(false)
+        requestRef.current = null
       }
-    } catch {
-      setUser(null)
+    })()
+
+    return requestRef.current
+  }, [user])
+
+  const logout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+      })
+    } catch (err) {
+      console.error('[auth/logout]', err)
     } finally {
-      setLoading(false)
+      setUser(null)
+      setError(null)
+      window.location.assign('/')
     }
-  }
-
-  const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-    setUser(null)
-    window.location.href = '/'
-  }
-
-  useEffect(() => {
-    refresh()
   }, [])
 
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
   return (
-    <AuthContext.Provider value={{ user, loading, refresh, logout }}>
+    <AuthContext.Provider value={{ user, loading, error, refresh, logout }}>
       {children}
     </AuthContext.Provider>
   )
