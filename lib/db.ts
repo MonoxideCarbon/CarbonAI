@@ -1,297 +1,322 @@
 import crypto from 'crypto'
-import { deleteLatestFile, downloadJson, listFiles, uploadJson } from '@/lib/backblaze'
 import type { Chat, Memory, Message, User } from '@/types'
+import { getSupabaseAdmin, getSupabaseBucket } from '@/lib/supabase-admin'
 
-const ROOT = 'carbonai/v1'
-const LIST_LIMIT = 10000
-const READ_CONCURRENCY = 20
-
-function userPath(id: string) { return `${ROOT}/users/${id}.json` }
-function emailPath(email: string) {
-  const normalized = email.trim().toLowerCase()
-  return `${ROOT}/email-index/${crypto.createHash('sha256').update(normalized).digest('hex')}.json`
-}
-function verificationPath(token: string) {
-  return `${ROOT}/verification-index/${crypto.createHash('sha256').update(token).digest('hex')}.json`
-}
-function resetPath(token: string) {
-  return `${ROOT}/reset-index/${crypto.createHash('sha256').update(token).digest('hex')}.json`
-}
-function chatPath(userId: string, chatId: string) { return `${ROOT}/users/${userId}/chats/${chatId}.json` }
-function messagePath(userId: string, chatId: string, messageId: string) { return `${ROOT}/users/${userId}/messages/${chatId}/${messageId}.json` }
-function memoryPath(userId: string, memoryId: string) { return `${ROOT}/users/${userId}/memories/${memoryId}.json` }
-function attachmentPath(userId: string, attachmentId: string) { return `${ROOT}/users/${userId}/attachments/${attachmentId}.json` }
 function now() { return new Date().toISOString() }
 
-async function put<T>(path: string, value: T): Promise<void> {
-  await uploadJson(path, value)
-}
-
-async function remove(path: string): Promise<void> {
-  try {
-    await deleteLatestFile(path)
-  } catch (error: any) {
-    if (!String(error?.message || '').includes('(404)')) throw error
+function normalizeUser(row: any): User {
+  return {
+    id: String(row.id),
+    email: String(row.email),
+    password_hash: String(row.password_hash),
+    full_name: row.full_name ?? undefined,
+    avatar_url: row.avatar_url ?? undefined,
+    personality: row.personality || 'humanoid',
+    theme: row.theme || 'system',
+    memory_enabled: Boolean(row.memory_enabled),
+    email_verified: Boolean(row.email_verified),
+    verification_token: row.verification_token ?? undefined,
+    reset_token: row.reset_token ?? undefined,
+    reset_expires: row.reset_expires ?? undefined,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
   }
 }
 
-async function listJson<T>(prefix: string): Promise<T[]> {
-  const files = await listFiles(prefix, LIST_LIMIT)
-  const results: T[] = []
-  for (let i = 0; i < files.length; i += READ_CONCURRENCY) {
-    const batch = await Promise.all(
-      files.slice(i, i + READ_CONCURRENCY).map(async (file) => downloadJson<T>(file.fileName))
-    )
-    for (const value of batch) if (value) results.push(value)
+function normalizeChat(row: any): Chat {
+  return {
+    id: String(row.id),
+    user_id: String(row.user_id),
+    title: String(row.title || 'New Chat'),
+    pinned: Boolean(row.pinned),
+    archived: Boolean(row.archived),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
   }
-  return results
+}
+
+function normalizeMessage(row: any): Message {
+  return {
+    id: String(row.id),
+    chat_id: String(row.chat_id),
+    user_id: String(row.user_id),
+    role: row.role,
+    content: String(row.content || ''),
+    attachments: Array.isArray(row.attachments) ? row.attachments : [],
+    model_used: row.model_used ?? undefined,
+    sources: Array.isArray(row.sources) ? row.sources : [],
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  }
+}
+
+function normalizeMemory(row: any): Memory {
+  return {
+    id: String(row.id),
+    user_id: String(row.user_id),
+    key: String(row.key),
+    value: String(row.value),
+    category: String(row.category || 'general'),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  }
 }
 
 export async function getUserByEmail(email: string): Promise<User | undefined> {
-  const id = await downloadJson<{ userId: string }>(emailPath(email))
-  if (!id?.userId) return undefined
-  return getUserById(id.userId)
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('users').select('*').eq('email', email.trim().toLowerCase()).maybeSingle()
+  if (error) throw new Error(`Supabase user lookup failed: ${error.message}`)
+  return data ? normalizeUser(data) : undefined
 }
 
 export async function getUserById(id: string): Promise<User | undefined> {
-  return (await downloadJson<User>(userPath(id))) || undefined
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('users').select('*').eq('id', id).maybeSingle()
+  if (error) throw new Error(`Supabase user lookup failed: ${error.message}`)
+  return data ? normalizeUser(data) : undefined
 }
 
 export async function createUser(data: { id: string; email: string; password_hash: string; full_name?: string; verification_token?: string }): Promise<void> {
-  const stamp = now()
-  const user: User = {
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('users').insert({
     id: data.id,
-    email: data.email.toLowerCase().trim(),
+    email: data.email.trim().toLowerCase(),
     password_hash: data.password_hash,
-    full_name: data.full_name || undefined,
+    full_name: data.full_name || null,
     personality: 'humanoid',
     theme: 'system',
-    memory_enabled: 1,
-    email_verified: 1,
-    verification_token: data.verification_token,
-    created_at: stamp,
-    updated_at: stamp,
-  }
-
-  try {
-    await put(userPath(user.id), user)
-    await put(emailPath(user.email), { userId: user.id })
-    if (user.verification_token) await put(verificationPath(user.verification_token), { userId: user.id })
-  } catch (error) {
-    await Promise.allSettled([
-      remove(userPath(user.id)),
-      remove(emailPath(user.email)),
-      user.verification_token ? remove(verificationPath(user.verification_token)) : Promise.resolve(),
-    ])
-    throw error
-  }
+    memory_enabled: true,
+    email_verified: true,
+    verification_token: data.verification_token || null,
+    created_at: now(),
+    updated_at: now(),
+  })
+  if (error) throw new Error(`Supabase user creation failed: ${error.message}`)
 }
 
 export async function deleteUser(userId: string): Promise<void> {
-  const user = await getUserById(userId)
-  const [chats, messages, memories, attachments] = await Promise.all([
-    listJson<Chat>(`${ROOT}/users/${userId}/chats/`),
-    listJson<Message>(`${ROOT}/users/${userId}/messages/`),
-    listJson<Memory>(`${ROOT}/users/${userId}/memories/`),
-    listJson<any>(`${ROOT}/users/${userId}/attachments/`),
-  ])
+  const supabase = getSupabaseAdmin()
+  const { data: files } = await supabase.from('attachments').select('storage_path').eq('user_id', userId)
+  const paths = (files || []).map(file => file.storage_path).filter(Boolean)
+  if (paths.length) await supabase.storage.from(getSupabaseBucket()).remove(paths)
 
-  await Promise.all([
-    user ? remove(emailPath(user.email)) : Promise.resolve(),
-    user?.verification_token ? remove(verificationPath(user.verification_token)) : Promise.resolve(),
-    user?.reset_token ? remove(resetPath(user.reset_token)) : Promise.resolve(),
-    ...chats.map(c => remove(chatPath(userId, c.id))),
-    ...messages.map(m => remove(messagePath(userId, m.chat_id, m.id))),
-    ...memories.map(m => remove(memoryPath(userId, m.id))),
-    ...attachments.map(a => remove(attachmentPath(userId, a.id))),
-    remove(userPath(userId)),
-  ])
+  const { error } = await supabase.from('users').delete().eq('id', userId)
+  if (error) throw new Error(`Supabase account deletion failed: ${error.message}`)
 }
 
 export async function updateUser(userId: string, updates: Partial<User>): Promise<User | undefined> {
-  const user = await getUserById(userId)
-  if (!user) return undefined
+  const supabase = getSupabaseAdmin()
   const allowed = ['full_name', 'avatar_url', 'personality', 'theme', 'memory_enabled'] as const
-  for (const key of allowed) {
-    if (key in updates) (user as any)[key] = (updates as any)[key]
-  }
-  user.updated_at = now()
-  await put(userPath(userId), user)
-  return user
+  const patch: Record<string, unknown> = { updated_at: now() }
+  for (const key of allowed) if (key in updates) patch[key] = (updates as any)[key]
+  const { data, error } = await supabase.from('users').update(patch).eq('id', userId).select('*').maybeSingle()
+  if (error) throw new Error(`Supabase user update failed: ${error.message}`)
+  return data ? normalizeUser(data) : undefined
 }
 
 export async function verifyUserEmail(token: string): Promise<boolean> {
-  const id = await downloadJson<{ userId: string }>(verificationPath(token))
-  if (!id?.userId) return false
-  const user = await getUserById(id.userId)
-  if (!user || user.verification_token !== token) return false
-  user.email_verified = 1
-  delete user.verification_token
-  user.updated_at = now()
-  await Promise.all([
-    put(userPath(user.id), user),
-    remove(verificationPath(token)),
-  ])
+  const supabase = getSupabaseAdmin()
+  const { data: user, error } = await supabase.from('users').select('*').eq('verification_token', token).maybeSingle()
+  if (error) throw new Error(`Supabase verification lookup failed: ${error.message}`)
+  if (!user) return false
+  const { error: updateError } = await supabase.from('users').update({ email_verified: true, verification_token: null, updated_at: now() }).eq('id', user.id)
+  if (updateError) throw new Error(`Supabase email verification failed: ${updateError.message}`)
   return true
 }
 
 export async function setResetToken(email: string, token: string, expires: string): Promise<void> {
-  const user = await getUserByEmail(email)
+  const supabase = getSupabaseAdmin()
+  const { data: user, error: lookupError } = await supabase.from('users').select('id').eq('email', email.trim().toLowerCase()).maybeSingle()
+  if (lookupError) throw new Error(`Supabase reset lookup failed: ${lookupError.message}`)
   if (!user) return
-  if (user.reset_token) await remove(resetPath(user.reset_token))
-  user.reset_token = token
-  user.reset_expires = expires
-  user.updated_at = now()
-  await Promise.all([
-    put(userPath(user.id), user),
-    put(resetPath(token), { userId: user.id }),
-  ])
+  const { error } = await supabase.from('users').update({ reset_token: token, reset_expires: expires, updated_at: now() }).eq('id', user.id)
+  if (error) throw new Error(`Supabase reset token update failed: ${error.message}`)
 }
 
 export async function resetPassword(token: string, passwordHash: string): Promise<boolean> {
-  const id = await downloadJson<{ userId: string }>(resetPath(token))
-  if (!id?.userId) return false
-  const user = await getUserById(id.userId)
-  if (!user || user.reset_token !== token || !user.reset_expires || user.reset_expires <= now()) {
-    await remove(resetPath(token))
-    return false
-  }
-
-  user.password_hash = passwordHash
-  delete user.reset_token
-  delete user.reset_expires
-  user.updated_at = now()
-  await Promise.all([
-    put(userPath(user.id), user),
-    remove(resetPath(token)),
-  ])
+  const supabase = getSupabaseAdmin()
+  const { data: user, error: lookupError } = await supabase.from('users').select('id, reset_expires').eq('reset_token', token).maybeSingle()
+  if (lookupError) throw new Error(`Supabase reset lookup failed: ${lookupError.message}`)
+  if (!user || !user.reset_expires || new Date(user.reset_expires).getTime() <= Date.now()) return false
+  const { error } = await supabase.from('users').update({ password_hash: passwordHash, reset_token: null, reset_expires: null, updated_at: now() }).eq('id', user.id)
+  if (error) throw new Error(`Supabase password reset failed: ${error.message}`)
   return true
 }
 
 export async function createChat(userId: string): Promise<Chat> {
-  const stamp = now()
-  const chat: Chat = { id: crypto.randomUUID(), user_id: userId, title: 'New Chat', pinned: false, archived: false, created_at: stamp, updated_at: stamp }
-  await put(chatPath(userId, chat.id), chat)
+  const chat: Chat = { id: crypto.randomUUID(), user_id: userId, title: 'New Chat', pinned: false, archived: false, created_at: now(), updated_at: now() }
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('chats').insert(chat)
+  if (error) throw new Error(`Supabase chat creation failed: ${error.message}`)
   return chat
 }
 
 export async function getChat(userId: string, chatId: string): Promise<Chat | undefined> {
-  return (await downloadJson<Chat>(chatPath(userId, chatId))) || undefined
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('chats').select('*').eq('id', chatId).eq('user_id', userId).maybeSingle()
+  if (error) throw new Error(`Supabase chat lookup failed: ${error.message}`)
+  return data ? normalizeChat(data) : undefined
 }
 
 export async function listChats(userId: string): Promise<Chat[]> {
-  const chats = await listJson<Chat>(`${ROOT}/users/${userId}/chats/`)
-  return chats.filter(c => !c.archived).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at.localeCompare(a.updated_at))
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('chats').select('*').eq('user_id', userId).eq('archived', false).order('pinned', { ascending: false }).order('updated_at', { ascending: false })
+  if (error) throw new Error(`Supabase chat list failed: ${error.message}`)
+  return (data || []).map(normalizeChat)
 }
 
 export async function updateChat(userId: string, chatId: string, updates: Partial<Chat>): Promise<Chat | undefined> {
-  const chat = await getChat(userId, chatId)
-  if (!chat) return undefined
-  Object.assign(chat, updates, { updated_at: now() })
-  await put(chatPath(userId, chatId), chat)
-  return chat
+  const supabase = getSupabaseAdmin()
+  const patch: Record<string, unknown> = { updated_at: now() }
+  for (const key of ['title', 'pinned', 'archived'] as const) if (key in updates) patch[key] = (updates as any)[key]
+  const { data, error } = await supabase.from('chats').update(patch).eq('id', chatId).eq('user_id', userId).select('*').maybeSingle()
+  if (error) throw new Error(`Supabase chat update failed: ${error.message}`)
+  return data ? normalizeChat(data) : undefined
 }
 
 export async function deleteChat(userId: string, chatId: string): Promise<void> {
-  const [chat, messages, attachments] = await Promise.all([
-    getChat(userId, chatId),
-    listMessages(userId, chatId),
-    listJson<any>(`${ROOT}/users/${userId}/attachments/`),
-  ])
-  if (!chat) return
-  await Promise.all([
-    remove(chatPath(userId, chatId)),
-    ...messages.map(m => remove(messagePath(userId, chatId, m.id))),
-    ...attachments.filter(a => a.chat_id === chatId).map(a => remove(attachmentPath(userId, a.id))),
-  ])
+  const supabase = getSupabaseAdmin()
+  const { data: files } = await supabase.from('attachments').select('storage_path').eq('user_id', userId).eq('chat_id', chatId)
+  const paths = (files || []).map(file => file.storage_path).filter(Boolean)
+  if (paths.length) await supabase.storage.from(getSupabaseBucket()).remove(paths)
+  const { error } = await supabase.from('chats').delete().eq('id', chatId).eq('user_id', userId)
+  if (error) throw new Error(`Supabase chat deletion failed: ${error.message}`)
 }
 
 export async function listMessages(userId: string, chatId: string): Promise<Message[]> {
-  const messages = await listJson<Message>(`${ROOT}/users/${userId}/messages/${chatId}/`)
-  return messages.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('messages').select('*').eq('chat_id', chatId).eq('user_id', userId).order('created_at', { ascending: true }).order('id', { ascending: true })
+  if (error) throw new Error(`Supabase message list failed: ${error.message}`)
+  return (data || []).map(normalizeMessage)
 }
 
 export async function saveMessage(message: Message): Promise<void> {
-  await put(messagePath(message.user_id, message.chat_id, message.id), {
-    ...message,
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('messages').upsert({
+    id: message.id,
+    chat_id: message.chat_id,
+    user_id: message.user_id,
+    role: message.role,
+    content: message.content || '',
     attachments: message.attachments || [],
+    model_used: message.model_used || null,
     sources: message.sources || [],
     created_at: message.created_at || now(),
-    updated_at: message.updated_at || now(),
+    updated_at: now(),
   })
+  if (error) throw new Error(`Supabase message save failed: ${error.message}`)
 }
 
 export async function getMessage(userId: string, chatId: string, messageId: string): Promise<Message | undefined> {
-  return (await downloadJson<Message>(messagePath(userId, chatId, messageId))) || undefined
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('messages').select('*').eq('id', messageId).eq('chat_id', chatId).eq('user_id', userId).maybeSingle()
+  if (error) throw new Error(`Supabase message lookup failed: ${error.message}`)
+  return data ? normalizeMessage(data) : undefined
 }
 
 export async function updateMessage(userId: string, chatId: string, messageId: string, updates: Partial<Message>): Promise<Message | undefined> {
-  const message = await getMessage(userId, chatId, messageId)
-  if (!message) return undefined
-  Object.assign(message, updates, { updated_at: now() })
-  await put(messagePath(userId, chatId, messageId), message)
-  return message
+  const supabase = getSupabaseAdmin()
+  const patch: Record<string, unknown> = { updated_at: now() }
+  for (const key of ['content', 'model_used', 'attachments', 'sources'] as const) if (key in updates) patch[key] = (updates as any)[key]
+  const { data, error } = await supabase.from('messages').update(patch).eq('id', messageId).eq('chat_id', chatId).eq('user_id', userId).select('*').maybeSingle()
+  if (error) throw new Error(`Supabase message update failed: ${error.message}`)
+  return data ? normalizeMessage(data) : undefined
 }
 
 export async function listMemories(userId: string): Promise<Memory[]> {
-  const memories = await listJson<Memory>(`${ROOT}/users/${userId}/memories/`)
-  return memories.sort((a, b) => b.created_at.localeCompare(a.created_at))
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('memories').select('*').eq('user_id', userId).order('created_at', { ascending: false })
+  if (error) throw new Error(`Supabase memory list failed: ${error.message}`)
+  return (data || []).map(normalizeMemory)
 }
 
 export async function getMemory(userId: string, memoryId: string): Promise<Memory | undefined> {
-  return (await downloadJson<Memory>(memoryPath(userId, memoryId))) || undefined
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('memories').select('*').eq('id', memoryId).eq('user_id', userId).maybeSingle()
+  if (error) throw new Error(`Supabase memory lookup failed: ${error.message}`)
+  return data ? normalizeMemory(data) : undefined
 }
 
 export async function upsertMemory(userId: string, key: string, value: string): Promise<Memory> {
-  const memories = await listMemories(userId)
-  const existing = memories.find(m => m.key === key)
-  const stamp = now()
+  const existing = (await listMemories(userId)).find(memory => memory.key === key)
   const memory: Memory = existing
-    ? { ...existing, value, updated_at: stamp }
-    : { id: crypto.randomUUID(), user_id: userId, key, value, category: 'general', created_at: stamp, updated_at: stamp }
-  await put(memoryPath(userId, memory.id), memory)
-  return memory
+    ? { ...existing, value, updated_at: now() }
+    : { id: crypto.randomUUID(), user_id: userId, key, value, category: 'general', created_at: now(), updated_at: now() }
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('memories').upsert({ ...memory }).select('*').single()
+  if (error) throw new Error(`Supabase memory save failed: ${error.message}`)
+  return normalizeMemory(data)
 }
 
 export async function updateMemory(userId: string, memoryId: string, updates: Partial<Memory>): Promise<Memory | undefined> {
-  const memory = await getMemory(userId, memoryId)
-  if (!memory) return undefined
-  Object.assign(memory, updates, { updated_at: now() })
-  await put(memoryPath(userId, memoryId), memory)
-  return memory
+  const supabase = getSupabaseAdmin()
+  const patch: Record<string, unknown> = { updated_at: now() }
+  for (const key of ['key', 'value', 'category'] as const) if (key in updates) patch[key] = (updates as any)[key]
+  const { data, error } = await supabase.from('memories').update(patch).eq('id', memoryId).eq('user_id', userId).select('*').maybeSingle()
+  if (error) throw new Error(`Supabase memory update failed: ${error.message}`)
+  return data ? normalizeMemory(data) : undefined
 }
 
 export async function deleteMemory(userId: string, memoryId: string): Promise<void> {
-  await remove(memoryPath(userId, memoryId))
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('memories').delete().eq('id', memoryId).eq('user_id', userId)
+  if (error) throw new Error(`Supabase memory deletion failed: ${error.message}`)
 }
 
 export async function deleteAllMemories(userId: string): Promise<void> {
-  const memories = await listMemories(userId)
-  await Promise.all(memories.map(m => remove(memoryPath(userId, m.id))))
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('memories').delete().eq('user_id', userId)
+  if (error) throw new Error(`Supabase memory deletion failed: ${error.message}`)
 }
 
 export async function saveAttachment(userId: string, value: any): Promise<void> {
-  await put(attachmentPath(userId, value.id), value)
+  const supabase = getSupabaseAdmin()
+  const { error } = await supabase.from('attachments').upsert({
+    id: value.id,
+    user_id: userId,
+    chat_id: value.chat_id || null,
+    filename: value.filename,
+    file_type: value.file_type || 'application/octet-stream',
+    file_size: value.file_size || 0,
+    storage_path: value.storage_path,
+    created_at: value.created_at || now(),
+  })
+  if (error) throw new Error(`Supabase attachment save failed: ${error.message}`)
 }
 
 export async function listAttachments(userId: string): Promise<any[]> {
-  return listJson<any>(`${ROOT}/users/${userId}/attachments/`)
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('attachments').select('*').eq('user_id', userId).order('created_at', { ascending: false })
+  if (error) throw new Error(`Supabase attachment list failed: ${error.message}`)
+  return data || []
 }
 
 export async function findAttachmentByStoragePath(userId: string, storagePath: string): Promise<any | undefined> {
-  return (await listAttachments(userId)).find(a => a.storage_path === storagePath)
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('attachments').select('*').eq('user_id', userId).eq('storage_path', storagePath).maybeSingle()
+  if (error) throw new Error(`Supabase attachment lookup failed: ${error.message}`)
+  return data || undefined
 }
 
 export async function exportUserData(userId: string): Promise<{ chats: Chat[]; messages: Message[]; memories: Memory[] }> {
-  const [chats, messages, memories] = await Promise.all([
-    listJson<Chat>(`${ROOT}/users/${userId}/chats/`),
-    listJson<Message>(`${ROOT}/users/${userId}/messages/`),
-    listJson<Memory>(`${ROOT}/users/${userId}/memories/`),
-  ])
+  const [chats, messages, memories] = await Promise.all([listChats(userId), getAllMessages(userId), listMemories(userId)])
   return { chats, messages, memories }
 }
 
+async function getAllMessages(userId: string): Promise<Message[]> {
+  const supabase = getSupabaseAdmin()
+  const { data, error } = await supabase.from('messages').select('*').eq('user_id', userId).order('created_at', { ascending: true })
+  if (error) throw new Error(`Supabase message export failed: ${error.message}`)
+  return (data || []).map(normalizeMessage)
+}
+
 export async function getStorageHealth(): Promise<boolean> {
-  await put(`${ROOT}/health.json`, { ok: true, updatedAt: now() })
+  const supabase = getSupabaseAdmin()
+  const [dbResult, storageResult] = await Promise.all([
+    supabase.from('users').select('id', { head: true, count: 'exact' }).limit(1),
+    supabase.storage.from(getSupabaseBucket()).list('', { limit: 1 }),
+  ])
+  if (dbResult.error) throw new Error(`Supabase database health check failed: ${dbResult.error.message}`)
+  if (storageResult.error) throw new Error(`Supabase storage health check failed: ${storageResult.error.message}`)
   return true
 }
