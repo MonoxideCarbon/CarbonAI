@@ -126,15 +126,30 @@ export default function ChatPage() {
   if (!user) return null
 
   return (
-    <div className="min-h-screen flex bg-white text-carbon-900 dark:bg-carbon-950 dark:text-carbon-100">
-      <div className="hidden md:block w-72 flex-shrink-0"><Sidebar chats={chats} activeChat={activeChat} onSelectChat={setActiveChat} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} /></div>
-      {sidebarOpen && <div className="fixed inset-0 z-50 md:hidden"><div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} /><div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-2xl dark:bg-carbon-900"><Sidebar chats={chats} activeChat={activeChat} onSelectChat={id => { setActiveChat(id); setSidebarOpen(false) }} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} /></div></div>}
+    <div className="h-screen overflow-hidden flex bg-white text-carbon-900 dark:bg-carbon-950 dark:text-carbon-100">
+      <aside className="hidden md:flex h-screen w-72 flex-shrink-0 sticky top-0">
+        <Sidebar chats={chats} activeChat={activeChat} onSelectChat={setActiveChat} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} />
+      </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        {authError && <div className="mx-4 mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200">{authError}</div>}
-        {pageError && <div className="mx-4 mt-3 flex items-center justify-between gap-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-200"><span>{pageError}</span><div className="flex gap-2"><button onClick={() => void loadChats()} className="rounded-xl px-3 py-1.5 font-medium hover:bg-red-100 dark:hover:bg-red-900/30">Retry</button><button onClick={() => setPageError(null)} className="rounded-xl px-2 py-1 hover:bg-red-100 dark:hover:bg-red-900/30">Dismiss</button></div></div>}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />
+          <div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-2xl dark:bg-carbon-900">
+            <Sidebar chats={chats} activeChat={activeChat} onSelectChat={id => { setActiveChat(id); setSidebarOpen(false) }} onCreateChat={() => void createChat()} onDeleteChat={deleteChat} onRenameChat={renameChat} onPinChat={pinChat} />
+          </div>
+        </div>
+      )}
+
+      <main className="relative flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
+        {authError && <div className="absolute left-4 right-4 top-3 z-40 rounded-2xl border border-amber-200 bg-amber-50/95 px-4 py-3 text-sm text-amber-800 shadow-lg backdrop-blur dark:border-amber-900/60 dark:bg-amber-950/90 dark:text-amber-200">{authError}</div>}
+        {pageError && (
+          <div className="absolute left-4 right-4 top-3 z-40 flex items-center justify-between gap-4 rounded-2xl border border-red-200 bg-red-50/95 px-4 py-3 text-sm text-red-700 shadow-lg backdrop-blur dark:border-red-900/60 dark:bg-red-950/90 dark:text-red-200">
+            <span className="min-w-0 truncate">{pageError}</span>
+            <div className="flex shrink-0 gap-2"><button onClick={() => void loadChats()} className="rounded-xl px-3 py-1.5 font-medium hover:bg-red-100 dark:hover:bg-red-900/30">Retry</button><button onClick={() => setPageError(null)} className="rounded-xl px-2 py-1 hover:bg-red-100 dark:hover:bg-red-900/30">Dismiss</button></div>
+          </div>
+        )}
         <ModernChatInterface chatId={activeChat} onCreateChat={() => void createChat()} onOpenSidebar={() => setSidebarOpen(true)} onTitleChange={handleTitleChange} user={user} />
-      </div>
+      </main>
     </div>
   )
 }
