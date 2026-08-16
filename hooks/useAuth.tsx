@@ -27,6 +27,8 @@ const AuthContext = createContext<AuthContextType>({
   logout: async () => {},
 })
 
+const AUTH_TIMEOUT_MS = 8000
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
@@ -38,12 +40,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user])
 
   const refresh = useCallback(async (): Promise<AuthUser | null> => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS)
+
     try {
       const res = await fetch('/api/auth/me', {
         method: 'GET',
         credentials: 'include',
         cache: 'no-store',
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       })
       const data = await res.json().catch(() => null)
 
@@ -72,9 +78,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return userRef.current
     } catch (err) {
       console.error('[auth/session]', err)
-      setError('Unable to reach the authentication service.')
+      setError(err instanceof DOMException && err.name === 'AbortError'
+        ? 'Authentication check timed out. Please try again.'
+        : 'Unable to reach the authentication service.')
       return userRef.current
     } finally {
+      window.clearTimeout(timeout)
       setLoading(false)
     }
   }, [])
