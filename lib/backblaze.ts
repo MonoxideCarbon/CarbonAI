@@ -13,13 +13,15 @@ async function getAuth(): Promise<B2Auth> {
 
   const keyId = process.env.B2_KEY_ID!
   const appKey = process.env.B2_APPLICATION_KEY!
+  if (!keyId || !appKey) throw new Error('Backblaze B2 credentials are not configured')
   const credentials = Buffer.from(`${keyId}:${appKey}`).toString('base64')
 
   const res = await fetch('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
     headers: { Authorization: `Basic ${credentials}` },
+    cache: 'no-store',
   })
 
-  if (!res.ok) throw new Error('B2 auth failed')
+  if (!res.ok) throw new Error(`B2 auth failed (${res.status})`)
   const data = await res.json()
 
   const auth: B2Auth = {
@@ -28,7 +30,7 @@ async function getAuth(): Promise<B2Auth> {
     downloadUrl: data.downloadUrl,
   }
 
-  authCache = { auth, expires: Date.now() + 23 * 60 * 60 * 1000 } // 23 hours
+  authCache = { auth, expires: Date.now() + 23 * 60 * 60 * 1000 }
   return auth
 }
 
@@ -38,9 +40,10 @@ async function getUploadUrl(bucketId: string): Promise<{ uploadUrl: string; uplo
     method: 'POST',
     headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ bucketId }),
+    cache: 'no-store',
   })
 
-  if (!res.ok) throw new Error('Failed to get upload URL')
+  if (!res.ok) throw new Error(`Failed to get B2 upload URL (${res.status})`)
   return res.json()
 }
 
@@ -49,9 +52,10 @@ export async function uploadFile(
   fileData: Buffer,
   contentType: string
 ): Promise<{ fileId: string; fileName: string }> {
-  const bucketId = process.env.B2_BUCKET_ID!
-  const { uploadUrl, uploadAuthToken } = await getUploadUrl(bucketId)
+  const bucketId = process.env.B2_BUCKET_ID
+  if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
 
+  const { uploadUrl, uploadAuthToken } = await getUploadUrl(bucketId)
   const hash = crypto.createHash('sha1').update(fileData).digest('hex')
 
   const res = await fetch(uploadUrl, {
@@ -64,6 +68,7 @@ export async function uploadFile(
       'X-Bz-Info-Author': 'carbonai-private',
     },
     body: new Uint8Array(fileData),
+    cache: 'no-store',
   })
 
   if (!res.ok) {
@@ -75,39 +80,101 @@ export async function uploadFile(
   return { fileId: data.fileId, fileName: data.fileName }
 }
 
+export async function uploadJson<T>(fileName: string, value: T): Promise<{ fileId: string; fileName: string }> {
+  const body = Buffer.from(JSON.stringify(value), 'utf8')
+  return uploadFile(fileName, body, 'application/json')
+}
+
 export async function deleteFile(fileId: string, fileName: string): Promise<void> {
   const auth = await getAuth()
   const res = await fetch(`${auth.apiUrl}/b2api/v2/b2_delete_file_version`, {
     method: 'POST',
     headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fileId, fileName }),
+    cache: 'no-store',
   })
 
-  if (!res.ok) throw new Error('Failed to delete file from B2')
+  if (!res.ok) throw new Error(`Failed to delete file from B2 (${res.status})`)
+}
+
+export async function deleteLatestFile(fileName: string): Promise<void> {
+  const files = await listFiles(fileName, 1)
+  const file = files[0]
+  if (file) await deleteFile(file.fileId, file.fileName)
+}
+
+export async function listFiles(prefix: string = '', maxFileCount: number = 1000): Promise<Array<{ fileId: string; fileName: string; size: number; uploadTimestamp: number }>> {
+  const auth = await getAuth()
+  const bucketId = process.env.B2_BUCKET_ID
+  if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
+
+  const files: Array<{ fileId: string; fileName: string; size: number; uploadTimestamp: number }> = []
+  let startFileName: string | undefined
+
+  while (files.length < maxFileCount) {
+    const res = await fetch(`${auth.apiUrl}/b2api/v2/b2_list_file_names`, {
+      method: 'POST',
+      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bucketId,
+        prefix,
+        maxFileCount: Math.min(1000, maxFileCount - files.length),
+        ...(startFileName ? { startFileName } : {}),
+      }),
+      cache: 'no-store',
+    })
+
+    if (!res.ok) throw new Error(`B2 list failed (${res.status})`)
+    const data = await res.json()
+    const page = Array.isArray(data.files) ? data.files : []
+    for (const file of page) files.push({
+      fileId: file.fileId,
+      fileName: file.fileName,
+      size: file.contentLength || 0,
+      uploadTimestamp: file.uploadTimestamp || 0,
+    })
+
+    if (!data.nextFileName || page.length === 0) break
+    startFileName = data.nextFileName
+  }
+
+  return files
 }
 
 export async function getDownloadUrl(fileName: string): Promise<string> {
   const auth = await getAuth()
-  const bucketName = process.env.B2_BUCKET_NAME!
+  const bucketName = process.env.B2_BUCKET_NAME
+  if (!bucketName) throw new Error('B2_BUCKET_NAME is not configured')
   return `${auth.downloadUrl}/file/${bucketName}/${encodeURIComponent(fileName)}`
 }
 
 export async function getSignedDownloadUrl(fileName: string, duration: number = 3600): Promise<string> {
-  // For private buckets, B2 requires authorization. 
-  // We'll return a proxied URL that hits our API
+  void duration
   return `/api/upload/download?file=${encodeURIComponent(fileName)}`
 }
 
 export async function downloadFile(fileName: string): Promise<{ data: Buffer; contentType: string }> {
   const auth = await getAuth()
-  const bucketName = process.env.B2_BUCKET_NAME!
+  const bucketName = process.env.B2_BUCKET_NAME
+  if (!bucketName) throw new Error('B2_BUCKET_NAME is not configured')
   const url = `${auth.downloadUrl}/file/${bucketName}/${encodeURIComponent(fileName)}`
 
   const res = await fetch(url, {
     headers: { Authorization: auth.authorizationToken },
+    cache: 'no-store',
   })
 
-  if (!res.ok) throw new Error('Failed to download file')
+  if (!res.ok) throw new Error(`Failed to download file from B2 (${res.status})`)
   const data = Buffer.from(await res.arrayBuffer())
   return { data, contentType: res.headers.get('content-type') || 'application/octet-stream' }
+}
+
+export async function downloadJson<T>(fileName: string): Promise<T | null> {
+  try {
+    const { data } = await downloadFile(fileName)
+    return JSON.parse(data.toString('utf8')) as T
+  } catch (error: any) {
+    if (error?.message?.includes('(404)')) return null
+    throw error
+  }
 }
