@@ -52,10 +52,17 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const { messages, chatId, hasImages, hasDocuments } = body
     if (!Array.isArray(messages) || messages.length === 0 || typeof chatId !== 'string') return NextResponse.json({ error: 'Messages and chatId required' }, { status: 400 })
-    const recentMessages = messages.slice(-50) as Message[]
+
+    const rawMessages = messages.slice(-50) as Message[]
+    const recentMessages = rawMessages.map(message => ({
+      ...message,
+      chat_id: chatId,
+      user_id: user.id,
+      attachments: Array.isArray(message.attachments) ? message.attachments : [],
+      content: typeof message.content === 'string' ? message.content : '',
+    }))
     const lastMessage = recentMessages[recentMessages.length - 1]
     if (!lastMessage || lastMessage.role !== 'user') return NextResponse.json({ error: 'The last message must be from the user.' }, { status: 400 })
-    if (lastMessage.user_id !== user.id || lastMessage.chat_id !== chatId) return NextResponse.json({ error: 'Invalid message owner.' }, { status: 403 })
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -67,7 +74,7 @@ export async function POST(req: NextRequest) {
           if (!chat) throw new Error('Chat not found.')
 
           send({ status: lastMessage.attachments?.length ? 'Reading attachments…' : 'Saving message…' })
-          await saveMessage({ ...lastMessage, attachments: lastMessage.attachments || [], created_at: lastMessage.created_at || new Date().toISOString(), updated_at: lastMessage.updated_at || new Date().toISOString() })
+          await saveMessage({ ...lastMessage, created_at: lastMessage.created_at || new Date().toISOString(), updated_at: new Date().toISOString() })
 
           const userRecord = await getUserById(user.id)
           const memories = userRecord?.memory_enabled ? await listMemories(user.id) : []
