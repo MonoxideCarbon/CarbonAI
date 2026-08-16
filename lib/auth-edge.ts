@@ -16,7 +16,7 @@ function base64UrlDecodeText(str: string): string {
 function base64UrlEncode(input: ArrayBuffer): string {
   const bytes = new Uint8Array(input)
   let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
   return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
 }
 
