@@ -61,7 +61,14 @@ export async function readWebPage(url: string, timeoutMs = 6000): Promise<WebPag
 }
 
 export function extractUrls(text: string): string[] {
-  return [...new Set((text.match(/https?:\/\/[^\s<>"']+/gi) || []).map(url => url.replace(/[),.!?;:]+$/, '')))].slice(0, 3)
+  const matches = text.match(/https?:\/\/[^\s<>"']+/gi) || []
+  const urls: string[] = []
+  for (const raw of matches) {
+    const url = raw.replace(/[),.!?;:]+$/, '')
+    if (url && urls.indexOf(url) === -1) urls.push(url)
+    if (urls.length >= 3) break
+  }
+  return urls
 }
 
 export function shouldUseWeb(query: string): boolean {
