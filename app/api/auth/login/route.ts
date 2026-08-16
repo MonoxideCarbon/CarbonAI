@@ -30,9 +30,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error('[auth/login]', error)
     const message = String(error?.message || '')
-    if (message.includes('B2') || message.includes('Backblaze')) {
-      return NextResponse.json({ error: 'Authentication storage is temporarily unavailable. Please try again.' }, { status: 503 })
-    }
+    if (message.includes('Supabase')) return NextResponse.json({ error: 'Authentication storage is temporarily unavailable. Please try again.' }, { status: 503 })
     return NextResponse.json({ error: 'Login failed. Please try again.' }, { status: 500 })
   }
 }
