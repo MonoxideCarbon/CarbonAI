@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai'
 import Groq from 'groq-sdk'
 import OpenAI from 'openai'
 import { downloadAttachment } from '@/lib/db'
-import type { AIModel, Message, ModelCapabilities } from '@/types'
+import type { AIModel, Message } from '@/types'
 
 let geminiClient: GoogleGenerativeAI | null = null
 let groqClient: Groq | null = null
@@ -16,7 +16,6 @@ function getGeminiClient() {
   }
   return geminiClient
 }
-
 function getGroqClient() {
   if (!groqClient) {
     const key = process.env.GROQ_API_KEY?.trim()
@@ -25,7 +24,6 @@ function getGroqClient() {
   }
   return groqClient
 }
-
 function getOpenRouterClient() {
   if (!openRouterClient) {
     const key = process.env.OPENROUTER_API_KEY?.trim()
@@ -36,8 +34,8 @@ function getOpenRouterClient() {
 }
 
 const MODELS: AIModel[] = [
-  { id: 'gemini-3.5-flash', provider: 'gemini', name: 'Gemini 3.5 Flash', capabilities: { chat: true, vision: true, reasoning: true, coding: true, documents: true, largeContext: true }, contextLimit: 1_000_000, isFree: false, isHealthy: true, avgLatency: 0 },
-  { id: 'gemini-3.5-flash-lite', provider: 'gemini', name: 'Gemini 3.5 Flash-Lite', capabilities: { chat: true, vision: true, reasoning: true, coding: true, documents: true, largeContext: true }, contextLimit: 1_000_000, isFree: false, isHealthy: true, avgLatency: 0 },
+  { id: 'gemini-2.5-flash', provider: 'gemini', name: 'Gemini 2.5 Flash', capabilities: { chat: true, vision: true, reasoning: true, coding: true, documents: true, largeContext: true }, contextLimit: 1_048_576, isFree: false, isHealthy: true, avgLatency: 0 },
+  { id: 'gemini-2.5-flash-lite', provider: 'gemini', name: 'Gemini 2.5 Flash-Lite', capabilities: { chat: true, vision: true, reasoning: true, coding: true, documents: true, largeContext: true }, contextLimit: 1_048_576, isFree: false, isHealthy: true, avgLatency: 0 },
   { id: 'llama-3.3-70b-versatile', provider: 'groq', name: 'Llama 3.3 70B', capabilities: { chat: true, vision: false, reasoning: true, coding: true, documents: false, largeContext: true }, contextLimit: 131_072, isFree: false, isHealthy: true, avgLatency: 0 },
   { id: 'openai/gpt-oss-120b', provider: 'groq', name: 'GPT OSS 120B', capabilities: { chat: true, vision: false, reasoning: true, coding: true, documents: false, largeContext: true }, contextLimit: 131_072, isFree: false, isHealthy: true, avgLatency: 0 },
   { id: 'llama-3.1-8b-instant', provider: 'groq', name: 'Llama 3.1 8B Instant', capabilities: { chat: true, vision: false, reasoning: false, coding: true, documents: false, largeContext: true }, contextLimit: 131_072, isFree: false, isHealthy: true, avgLatency: 0 },
@@ -49,11 +47,9 @@ function providerConfigured(provider: AIModel['provider']): boolean {
   if (provider === 'groq') return Boolean(process.env.GROQ_API_KEY?.trim())
   return Boolean(process.env.OPENROUTER_API_KEY?.trim())
 }
-
 let modelHealthCache = new Map<string, AIModel>()
 let lastHealthRefresh = 0
 const HEALTH_REFRESH_INTERVAL = 5 * 60 * 1000
-
 export function getHealthCache(): Map<string, AIModel> {
   const now = Date.now()
   if (modelHealthCache.size === 0 || now - lastHealthRefresh >= HEALTH_REFRESH_INTERVAL) {
@@ -62,22 +58,8 @@ export function getHealthCache(): Map<string, AIModel> {
   }
   return modelHealthCache
 }
-
-export function markModelUnhealthy(modelId: string, error?: string) {
-  const model = getHealthCache().get(modelId)
-  if (!model) return
-  model.isHealthy = false
-  model.avgLatency = Number.POSITIVE_INFINITY
-  console.warn(`[CarbonAI] Model ${modelId} marked unhealthy: ${error || 'unknown error'}`)
-}
-
-export function markModelHealthy(modelId: string, latencyMs: number) {
-  const model = getHealthCache().get(modelId)
-  if (!model || !providerConfigured(model.provider)) return
-  model.isHealthy = true
-  model.avgLatency = latencyMs
-}
-
+export function markModelUnhealthy(modelId: string, error?: string) { const model = getHealthCache().get(modelId); if (!model) return; model.isHealthy = false; model.avgLatency = Number.POSITIVE_INFINITY; console.warn(`[CarbonAI] Model ${modelId} marked unhealthy: ${error || 'unknown error'}`) }
+export function markModelHealthy(modelId: string, latencyMs: number) { const model = getHealthCache().get(modelId); if (!model || !providerConfigured(model.provider)) return; model.isHealthy = true; model.avgLatency = latencyMs }
 export function estimateTokens(text: string): number { return Math.max(0, Math.ceil(text.length / 4)) }
 
 function analyzeRequest(messages: Message[], hasImages: boolean, hasDocuments: boolean, estimatedTokens: number) {
@@ -86,7 +68,6 @@ function analyzeRequest(messages: Message[], hasImages: boolean, hasDocuments: b
   const reasoning = /\b(explain|analyze|compare|evaluate|reason|complex|mathematical|prove|solve|logic)\b/.test(content) || content.length > 500
   return { chat: true, vision: hasImages, reasoning, coding, documents: hasDocuments, needsLargeContext: estimatedTokens > 32_000 || messages.length > 20 }
 }
-
 function scoreModel(model: AIModel, requirements: ReturnType<typeof analyzeRequest>): number {
   if (!model.isHealthy) return -100_000
   let score = 0
@@ -96,23 +77,20 @@ function scoreModel(model: AIModel, requirements: ReturnType<typeof analyzeReque
   if (requirements.reasoning && model.capabilities.reasoning) score += 250
   if (requirements.needsLargeContext && model.capabilities.largeContext) score += 300
   if (requirements.needsLargeContext && model.contextLimit < 64_000) score -= 300
-  if (model.provider === 'gemini' && (requirements.vision || requirements.documents || requirements.needsLargeContext)) score += 500
-  if (model.provider === 'openrouter' && model.isFree) score += 20
+  if (model.provider === 'gemini' && (requirements.vision || requirements.documents || requirements.needsLargeContext)) score += 700
   if (Number.isFinite(model.avgLatency) && model.avgLatency > 0) score -= model.avgLatency / 100
   score += model.contextLimit / 10_000
   return score
 }
-
 export function selectModel(messages: Message[], hasImages = false, hasDocuments = false, estimatedTokenCount = 0): AIModel | null {
   const requirements = analyzeRequest(messages, hasImages, hasDocuments, estimatedTokenCount)
   return Array.from(getHealthCache().values()).sort((a, b) => scoreModel(b, requirements) - scoreModel(a, requirements))[0] || null
 }
-
 export function getFailoverModels(primaryModel: AIModel): AIModel[] {
   return Array.from(getHealthCache().values()).filter(model => model.id !== primaryModel.id && model.isHealthy).sort((a, b) => {
     const penaltyA = a.provider === primaryModel.provider ? 100 : 0
     const penaltyB = b.provider === primaryModel.provider ? 100 : 0
-    const baseline = { chat: true, vision: false, reasoning: true, coding: true, documents: false, needsLargeContext: false }
+    const baseline = { chat: true, vision: primaryModel.capabilities.vision, reasoning: true, coding: true, documents: primaryModel.capabilities.documents, needsLargeContext: false }
     return (scoreModel(b, baseline) - penaltyB) - (scoreModel(a, baseline) - penaltyA)
   })
 }
@@ -131,87 +109,56 @@ export async function* generateResponse(model: AIModel, messages: Message[], sys
 }
 
 async function readAttachmentText(message: Message): Promise<string> {
-  const attachments = message.attachments || []
-  const textParts: string[] = []
-  for (const attachment of attachments) {
+  const parts: string[] = []
+  for (const attachment of message.attachments || []) {
     if (attachment.file_type?.startsWith('image/') || attachment.file_type === 'application/pdf') continue
     try {
       const { data } = await downloadAttachment(message.user_id, attachment.storage_path)
       const text = data.toString('utf8').slice(0, 120_000)
-      if (text.trim()) textParts.push(`\n\nAttachment: ${attachment.filename}\n${text}`)
-    } catch (error) {
-      console.warn(`[CarbonAI] Unable to read ${attachment.filename}:`, error)
-    }
+      if (text.trim()) parts.push(`\n\nAttachment: ${attachment.filename}\n${text}`)
+    } catch (error) { console.warn(`[CarbonAI] Unable to read ${attachment.filename}:`, error) }
   }
-  return textParts.join('')
+  return parts.join('')
 }
-
 async function geminiParts(message: Message): Promise<any[]> {
   const parts: any[] = []
   if (message.content) parts.push({ text: message.content })
   for (const attachment of message.attachments || []) {
     try {
       const { data } = await downloadAttachment(message.user_id, attachment.storage_path)
-      if (attachment.file_type?.startsWith('image/') || attachment.file_type === 'application/pdf') {
-        parts.push({ inlineData: { mimeType: attachment.file_type || 'application/octet-stream', data: data.toString('base64') } })
-      } else {
+      const mime = attachment.file_type || 'application/octet-stream'
+      if (mime.startsWith('image/') || mime === 'application/pdf') parts.push({ inlineData: { mimeType: mime, data: data.toString('base64') } })
+      else {
         const text = data.toString('utf8').slice(0, 120_000)
         if (text.trim()) parts.push({ text: `Attachment: ${attachment.filename}\n${text}` })
       }
-    } catch (error) {
-      parts.push({ text: `Attachment ${attachment.filename} could not be read.` })
-      console.warn(`[CarbonAI] Attachment read failed: ${attachment.filename}`, error)
-    }
+    } catch (error) { parts.push({ text: `Attachment ${attachment.filename} could not be read.` }); console.warn(`[CarbonAI] Attachment read failed: ${attachment.filename}`, error) }
   }
   return parts
 }
-
 async function* generateGeminiResponse(model: AIModel, messages: Message[], systemPrompt: string, temperature: number): AsyncGenerator<string, void, unknown> {
   const genModel = getGeminiClient().getGenerativeModel({ model: model.id, systemInstruction: systemPrompt, generationConfig: { ...(model.id.startsWith('gemini-3.') ? {} : { temperature }), maxOutputTokens: 8192 } })
-  const history = [] as any[]
+  const history: any[] = []
   for (const message of messages.slice(0, -1)) history.push({ role: message.role === 'user' ? 'user' : 'model', parts: await geminiParts(message) })
-  const lastMessage = messages[messages.length - 1]
-  const result = await genModel.startChat({ history }).sendMessageStream(await geminiParts(lastMessage))
-  for await (const chunk of result.stream) {
-    const text = chunk.text()
-    if (text) yield text
-  }
+  const result = await genModel.startChat({ history }).sendMessageStream(await geminiParts(messages[messages.length - 1]))
+  for await (const chunk of result.stream) { const text = chunk.text(); if (text) yield text }
 }
-
 async function* generateGroqResponse(model: AIModel, messages: Message[], systemPrompt: string, temperature: number): AsyncGenerator<string, void, unknown> {
   const mapped = await Promise.all(messages.map(async message => ({ role: message.role as 'user' | 'assistant' | 'system', content: `${message.content || ''}${await readAttachmentText(message)}` })))
   const stream = await getGroqClient().chat.completions.create({ model: model.id, messages: [{ role: 'system', content: systemPrompt }, ...mapped], temperature, max_tokens: 4096, stream: true })
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content
-    if (content) yield content
-  }
+  for await (const chunk of stream) { const content = chunk.choices[0]?.delta?.content; if (content) yield content }
 }
-
 async function* generateOpenRouterResponse(model: AIModel, messages: Message[], systemPrompt: string, temperature: number): AsyncGenerator<string, void, unknown> {
   const mapped = await Promise.all(messages.map(async message => ({ role: message.role as 'user' | 'assistant' | 'system', content: `${message.content || ''}${await readAttachmentText(message)}` })))
   const stream = await getOpenRouterClient().chat.completions.create({ model: model.id, messages: [{ role: 'system', content: systemPrompt }, ...mapped], temperature, max_tokens: 4096, stream: true })
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content
-    if (content) yield content
-  }
+  for await (const chunk of stream) { const content = chunk.choices[0]?.delta?.content; if (content) yield content }
 }
 
-export async function performWebSearch(query: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
-  try {
-    const { search } = await import('duck-duck-scrape')
-    const result = await search(query, { safeSearch: 0 })
-    return (result.results || []).slice(0, 4).map(item => ({ title: item.title, url: item.url, snippet: item.description }))
-  } catch (error) {
-    console.error('[CarbonAI] Web search failed:', error)
-    return []
-  }
-}
-
-export function buildSystemPrompt(personality: 'humanoid' | 'professional', memories: Array<{ key: string; value: string }>, hasSearchResults = false): string {
+export function buildSystemPrompt(personality: 'humanoid' | 'professional', memories: Array<{ key: string; value: string }>, webContext = ''): string {
   const base = personality === 'humanoid'
-    ? 'You are CarbonAI-Private, a helpful AI assistant. Be friendly, natural, concise, supportive, and human-like. You can inspect user attachments. Do not claim to have seen an attachment unless it was actually supplied. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
-    : 'You are CarbonAI-Private, a professional AI assistant. Be precise, direct, well-structured, and concise. You can inspect user attachments. Do not claim to have seen an attachment unless it was actually supplied. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
+    ? 'You are CarbonAI-Private, a helpful AI assistant. Be friendly, natural, concise, supportive, and human-like. You can inspect user attachments including images, PDFs, code and text. Treat image pixels as authoritative input when an image is attached. Carefully answer questions about visible text, diagrams, screenshots, charts, UI, handwriting, and code shown in images. Never claim you saw an attachment unless it was supplied. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
+    : 'You are CarbonAI-Private, a professional AI assistant. Be precise, direct, well-structured, and concise. You can inspect user attachments including images, PDFs, code and text. Treat image pixels as authoritative input when an image is attached. Carefully answer questions about visible text, diagrams, screenshots, charts, handwriting, and code shown in images. Never claim you saw an attachment unless it was supplied. Do not reveal which underlying model or provider you use. If asked, say: "I\'m CarbonAI-Private. I automatically choose the most suitable AI system for each request."'
   const memoryText = memories.length ? `\n\nRelevant information about the user:\n${memories.map(memory => `- ${memory.key}: ${memory.value}`).join('\n')}` : ''
-  const searchText = hasSearchResults ? '\n\nUse the supplied web-search results for current claims and cite them when appropriate.' : ''
-  return `${base}${memoryText}${searchText}`
+  const webText = webContext ? `\n\nLIVE WEB CONTEXT:\n${webContext}\n\nUse these sources as evidence. Do not invent facts that are not supported by the supplied sources. Mention the source URL when useful.` : ''
+  return `${base}${memoryText}${webText}`
 }
