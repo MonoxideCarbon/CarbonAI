@@ -20,6 +20,12 @@ function base64UrlEncode(input: ArrayBuffer): string {
   return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(buffer).set(bytes)
+  return buffer
+}
+
 export async function verifyTokenEdge(token: string): Promise<{ userId: string; email: string } | null> {
   try {
     const parts = token.split('.')
@@ -29,7 +35,12 @@ export async function verifyTokenEdge(token: string): Promise<{ userId: string; 
     if (!payload.sub || !payload.email || (payload.exp && Math.floor(Date.now() / 1000) > payload.exp)) return null
 
     const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(JWT_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
-    const valid = await crypto.subtle.verify('HMAC', key, base64UrlDecodeBytes(encodedSignature), new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`))
+    const valid = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      toArrayBuffer(base64UrlDecodeBytes(encodedSignature)),
+      new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`)
+    )
     if (!valid) return null
 
     return { userId: String(payload.sub), email: String(payload.email) }
