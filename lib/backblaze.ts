@@ -6,8 +6,6 @@ interface B2Auth {
   downloadUrl: string
 }
 
-let authCache: { auth: B2Auth; expires: number } | null = null
-
 function encodeB2Path(fileName: string): string {
   return fileName.split('/').map(segment => encodeURIComponent(segment)).join('/')
 }
@@ -16,25 +14,30 @@ function invalidateAuth() {
   authCache = null
 }
 
+let authCache: { auth: B2Auth; expires: number } | null = null
+
 async function getAuth(forceRefresh = false): Promise<B2Auth> {
   if (!forceRefresh && authCache && Date.now() < authCache.expires) return authCache.auth
 
   const keyId = process.env.B2_KEY_ID?.trim()
   const appKey = process.env.B2_APPLICATION_KEY?.trim()
   if (!keyId || !appKey) throw new Error('Backblaze B2 credentials are not configured')
-  const credentials = Buffer.from(`${keyId}:${appKey}`).toString('base64')
 
+  const credentials = Buffer.from(`${keyId}:${appKey}`).toString('base64')
   const res = await fetch('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
     headers: { Authorization: `Basic ${credentials}` },
     cache: 'no-store',
   })
 
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`B2 auth failed (${res.status})${detail ? `: ${detail}` : ''}`)
+    const body = await res.text().catch(() => '')
+    throw new Error(`B2 auth failed (${res.status}): ${body}`)
   }
+
   const data = await res.json()
-  if (!data.authorizationToken || !data.apiUrl || !data.downloadUrl) throw new Error('B2 returned an incomplete authorization response')
+  if (!data?.authorizationToken || !data?.apiUrl || !data?.downloadUrl) {
+    throw new Error('B2 authorization response was incomplete')
+  }
 
   const auth: B2Auth = {
     authorizationToken: data.authorizationToken,
@@ -67,48 +70,72 @@ async function getUploadUrl(bucketId: string, forceRefresh = false): Promise<{ u
   }
 
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`Failed to get B2 upload URL (${res.status})${detail ? `: ${detail}` : ''}`)
+    const body = await res.text().catch(() => '')
+    throw new Error(`Failed to get B2 upload URL (${res.status}): ${body}`)
   }
-  return res.json()
+
+  const data = await res.json()
+  if (!data?.uploadUrl || !data?.authorizationToken) {
+    throw new Error('B2 upload URL response was incomplete')
+  }
+
+  return { uploadUrl: data.uploadUrl, uploadAuthToken: data.authorizationToken }
 }
 
-export async function uploadFile(
+async function uploadWithTarget(
+  uploadUrl: string,
+  uploadAuthToken: string,
   fileName: string,
   fileData: Buffer,
-  contentType: string
-): Promise<{ fileId: string; fileName: string }> {
-  const bucketId = process.env.B2_BUCKET_ID?.trim()
-  if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
-
-  let { uploadUrl, uploadAuthToken } = await getUploadUrl(bucketId)
+  contentType: string,
+): Promise<Response> {
   const hash = crypto.createHash('sha1').update(fileData).digest('hex')
-
-  const upload = async () => fetch(uploadUrl, {
+  return fetch(uploadUrl, {
     method: 'POST',
     headers: {
       Authorization: uploadAuthToken,
-      'X-Bz-File-Name': encodeURIComponent(fileName),
+      'X-Bz-File-Name': encodeB2Path(fileName),
       'Content-Type': contentType || 'b2/x-auto',
+      'Content-Length': String(fileData.byteLength),
       'X-Bz-Content-Sha1': hash,
       'X-Bz-Info-Author': 'carbonai-private',
     },
     body: new Uint8Array(fileData),
     cache: 'no-store',
   })
+}
 
-  let res = await upload()
+export async function uploadFile(
+  fileName: string,
+  fileData: Buffer,
+  contentType: string,
+): Promise<{ fileId: string; fileName: string }> {
+  const bucketId = process.env.B2_BUCKET_ID?.trim()
+  if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
+
+  let target = await getUploadUrl(bucketId)
+  let res = await uploadWithTarget(target.uploadUrl, target.uploadAuthToken, fileName, fileData, contentType)
+
   if (res.status === 401) {
-    invalidateAuth()
-    const refreshed = await getUploadUrl(bucketId, true)
-    uploadUrl = refreshed.uploadUrl
-    uploadAuthToken = refreshed.uploadAuthToken
-    res = await upload()
+    const body = await res.text().catch(() => '')
+    let code = ''
+    try {
+      code = JSON.parse(body)?.code || ''
+    } catch {
+      // Ignore non-JSON error bodies.
+    }
+
+    if (code === 'bad_auth_token' || code === 'expired_auth_token') {
+      target = await getUploadUrl(bucketId, true)
+      res = await uploadWithTarget(target.uploadUrl, target.uploadAuthToken, fileName, fileData, contentType)
+    } else {
+      throw new Error(`B2 upload failed (401): ${body}`)
+    }
   }
 
   if (!res.ok) {
-    const err = await res.text().catch(() => '')
-    throw new Error(`B2 upload failed (${res.status})${err ? `: ${err}` : ''}`)
+    const body = await res.text().catch(() => '')
+    throw new Error(`B2 upload failed (${res.status}): ${body}`)
   }
 
   const data = await res.json()
@@ -116,8 +143,7 @@ export async function uploadFile(
 }
 
 export async function uploadJson<T>(fileName: string, value: T): Promise<{ fileId: string; fileName: string }> {
-  const body = Buffer.from(JSON.stringify(value), 'utf8')
-  return uploadFile(fileName, body, 'application/json')
+  return uploadFile(fileName, Buffer.from(JSON.stringify(value), 'utf8'), 'application/json')
 }
 
 export async function deleteFile(fileId: string, fileName: string): Promise<void> {
@@ -151,7 +177,7 @@ export async function deleteLatestFile(fileName: string): Promise<void> {
 
 export async function listFiles(prefix: string = '', maxFileCount: number = 1000): Promise<Array<{ fileId: string; fileName: string; size: number; uploadTimestamp: number }>> {
   let auth = await getAuth()
-  const bucketId = process.env.B2_BUCKET_ID?.trim()
+  const bucketId = process.env.B2_BUCKET_ID
   if (!bucketId) throw new Error('B2_BUCKET_ID is not configured')
 
   const files: Array<{ fileId: string; fileName: string; size: number; uploadTimestamp: number }> = []
@@ -211,7 +237,6 @@ export async function downloadFile(fileName: string): Promise<{ data: Buffer; co
     auth = await getAuth(true)
     res = await fetch(url(), { headers: { Authorization: auth.authorizationToken }, cache: 'no-store' })
   }
-
   if (!res.ok) throw new Error(`Failed to download file from B2 (${res.status})`)
   return { data: Buffer.from(await res.arrayBuffer()), contentType: res.headers.get('content-type') || 'application/octet-stream' }
 }
