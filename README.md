@@ -1,48 +1,34 @@
 # CarbonAI-Private
 
-A private AI chatbot with custom authentication, persistent Backblaze B2 storage, intelligent AI routing, web search, voice features, memory, themes, and Vercel deployment support.
+A private AI chatbot with custom authentication, persistent Supabase storage, intelligent AI routing, web search, voice features, memory, attachments, themes, and Vercel deployment support.
 
 ## Production architecture
 
 | Component | Technology |
 |---|---|
 | Hosting | Vercel / Next.js |
-| Auth | Custom JWT + HTTP-only cookie |
-| Persistent data | Backblaze B2 JSON objects |
-| File storage | Backblaze B2 |
+| Auth/session | CarbonAI JWT + HTTP-only cookie |
+| Persistent application data | Supabase Postgres |
+| File storage | Supabase Storage (private bucket) |
 | AI routing | Gemini → Groq → OpenRouter with failover |
 | Frontend | Next.js 14 + Tailwind CSS + TypeScript |
 
-CarbonAI deliberately does not require a separate database service. User records, chat metadata, messages, memories, and attachment metadata are stored as private JSON objects in Backblaze B2. Uploaded files are stored in the same B2 bucket.
+CarbonAI no longer uses Backblaze B2, Turso, SQLite, or another persistence provider. Users, chats, messages, memories, attachment metadata, password-reset state, and verification state are stored in Supabase Postgres. Uploaded files are stored in a private Supabase Storage bucket.
 
-## Backblaze B2 layout
+## Supabase setup
 
-```text
-carbonai/v1/
-  users/<user-id>.json
-  email-index/<sha256-email>.json
-  verification-index/<sha256-token>.json
-  reset-index/<sha256-token>.json
-  users/<user-id>/chats/<chat-id>.json
-  users/<user-id>/messages/<chat-id>/<message-id>.json
-  users/<user-id>/memories/<memory-id>.json
-  users/<user-id>/attachments/<attachment-id>.json
-```
-
-The application only accesses B2 from server-side code. Credentials are never exposed to the browser.
-
-## Vercel setup
-
-Add these environment variables to the **Production** environment of the CarbonAI Vercel project:
+1. Create a Supabase project.
+2. Open **SQL Editor** and run [`supabase/schema.sql`](./supabase/schema.sql).
+3. In the Supabase project settings, copy the Project URL and server-side service role key.
+4. Create the following Vercel Production environment variables:
 
 ```text
+NEXT_PUBLIC_SUPABASE_URL=<your Supabase project URL>
+SUPABASE_SERVICE_ROLE_KEY=<your Supabase service role key>
+SUPABASE_STORAGE_BUCKET=carbonai-files
+
 JWT_SECRET=<long random secret>
 ACCESS_KEY=<optional registration access key>
-
-B2_KEY_ID=<your B2 key id>
-B2_APPLICATION_KEY=<your B2 application key>
-B2_BUCKET_ID=<your B2 bucket id>
-B2_BUCKET_NAME=<your B2 bucket name>
 
 GEMINI_API_KEY=<optional Gemini key>
 GROQ_API_KEY=<optional Groq key>
@@ -56,9 +42,23 @@ SMTP_PASS=<optional>
 SMTP_FROM=<optional>
 ```
 
-At least one AI provider key is required for chat generation. B2 variables are required for production persistence.
+**Never expose `SUPABASE_SERVICE_ROLE_KEY` to the browser and never commit it to GitHub.** Supabase documents service-role keys as server-only credentials. urlSupabase JavaScript documentationhttps://supabase.com/docs/reference/javascript/initializing
 
-Do not commit secrets to GitHub.
+## Database and Storage model
+
+```text
+public.users
+public.chats
+public.messages
+public.memories
+public.attachments
+
+Supabase Storage bucket:
+  carbonai-files/
+    <user-id>/<chat-id>/<attachment-id>-<filename>
+```
+
+The bucket is private. CarbonAI accesses it only from server-side Route Handlers using the service-role key. The browser receives data through CarbonAI's authenticated `/api/upload` route.
 
 ## Deployment
 
@@ -74,29 +74,21 @@ After deployment, verify:
 https://YOUR-DOMAIN/api/health
 ```
 
-A healthy deployment reports `status: healthy` when at least one configured AI provider and B2 storage are working.
+A healthy deployment reports `storage: healthy` when Supabase Postgres and the private Storage bucket are reachable and at least one AI provider is healthy.
 
 ## Upload limit on Vercel
 
-The `/api/upload` route accepts files up to **4 MB**. This is intentionally below Vercel's serverless function request-body limit. Larger files should be rejected by the UI/API rather than producing opaque deployment/runtime failures.
+The `/api/upload` route accepts files up to **4 MB**. This keeps uploads below the serverless request-body limit and avoids opaque runtime failures.
 
-## Local development
-
-```bash
-npm install
-npm run dev
-```
-
-Local development uses the same B2 backend when the B2 environment variables are present. There is no local SQLite database dependency.
-
-## Security notes
+## Security
 
 - Passwords use salted PBKDF2-SHA512 hashing.
 - Auth tokens are stored in HTTP-only cookies.
-- Edge middleware verifies JWT signatures before protecting routes.
-- API keys stay server-side.
-- Backblaze B2 stores application data and uploaded files privately.
-- Account deletion removes application objects and associated uploaded B2 files.
+- Middleware verifies JWT signatures before protecting routes.
+- Supabase service-role credentials stay server-side.
+- Supabase tables use Row Level Security and are revoked from `anon` and `authenticated`; CarbonAI accesses them server-side.
+- Supabase Storage is private and application access is ownership-checked before download.
+- Account deletion removes database records and associated storage objects through Postgres foreign keys and server-side Storage deletion.
 
 ## API routes
 
@@ -116,12 +108,8 @@ Local development uses the same B2 backend when the B2 environment variables are
 | `/api/chat/delete` | DELETE | Delete chat |
 | `/api/upload` | POST/GET | Upload/download files |
 | `/api/search` | POST | Web search |
-| `/api/health` | GET | Check AI provider and B2 health |
+| `/api/health` | GET | Check AI providers and Supabase |
 
-## Important migration note
+## Migration note
 
-The old local SQLite/Turso implementation is no longer part of CarbonAI. Production state is stored in Backblaze B2 so Vercel serverless instances share the same persistent source of truth.
-
-## License
-
-MIT
+The old Backblaze B2 implementation has been removed. Existing B2 data is **not automatically imported** by this code change. Create the Supabase schema before deployment and treat Supabase as the new production source of truth.
