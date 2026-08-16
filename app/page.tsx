@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, Mail, Lock, User, Key, ArrowRight, CheckCircle } from 'lucide-react'
+import { useAuth } from '@/hooks/useAuth'
 
 export default function AuthPage() {
   const [mode, setMode] = useState<'login' | 'signup' | 'reset' | 'reset-confirm'>('login')
@@ -16,6 +17,20 @@ export default function AuthPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const router = useRouter()
+  const { refresh } = useAuth()
+
+  const responseError = async (res: Response) => {
+    const data = await res.json().catch(() => null)
+    return typeof data?.error === 'string' ? data.error : `Request failed (${res.status})`
+  }
+
+  const goToChatAfterAuth = async () => {
+    const sessionUser = await refresh()
+    if (!sessionUser) {
+      throw new Error('Login succeeded, but the session could not be verified. Please try again.')
+    }
+    router.replace('/chat')
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -26,55 +41,48 @@ export default function AuthPage() {
     try {
       if (mode === 'signup') {
         if (password !== confirmPassword) {
-          setError('Passwords do not match')
-          setLoading(false)
-          return
+          throw new Error('Passwords do not match')
         }
         const res = await fetch('/api/auth/signup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ email, password, full_name: fullName, access_key: accessKey }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
-        router.push('/chat')
+        if (!res.ok) throw new Error(await responseError(res))
+        await goToChatAfterAuth()
       } else if (mode === 'login') {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
           credentials: 'include',
+          body: JSON.stringify({ email, password }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
-        router.push('/chat')
+        if (!res.ok) throw new Error(await responseError(res))
+        await goToChatAfterAuth()
       } else if (mode === 'reset') {
         const res = await fetch('/api/auth/reset-request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
+        if (!res.ok) throw new Error(await responseError(res))
         setMessage('If the email exists, a reset link has been sent.')
       } else if (mode === 'reset-confirm') {
         if (password !== confirmPassword) {
-          setError('Passwords do not match')
-          setLoading(false)
-          return
+          throw new Error('Passwords do not match')
         }
         const res = await fetch('/api/auth/reset-confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: resetToken, password }),
         })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
+        if (!res.ok) throw new Error(await responseError(res))
         setMessage('Password updated! You can now log in.')
         setMode('login')
       }
-    } catch (err: any) {
-      setError(err.message || 'Something went wrong')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
       setLoading(false)
     }
@@ -139,9 +147,7 @@ export default function AuthPage() {
             </div>
           )}
 
-          {mode === 'reset-confirm' && (
-            <input type="hidden" value={resetToken} />
-          )}
+          {mode === 'reset-confirm' && <input type="hidden" value={resetToken} readOnly />}
 
           {error && (
             <div className="p-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-sm">
@@ -161,12 +167,12 @@ export default function AuthPage() {
         <div className="text-center space-y-2 text-sm">
           {mode === 'login' && (
             <>
-              <button onClick={() => setMode('signup')} className="text-accent hover:underline">Don't have an account? Sign up</button>
-              <div><button onClick={() => setMode('reset')} className="text-carbon-500 dark:text-carbon-400 hover:text-carbon-700">Forgot password?</button></div>
+              <button type="button" onClick={() => setMode('signup')} className="text-accent hover:underline">Don't have an account? Sign up</button>
+              <div><button type="button" onClick={() => setMode('reset')} className="text-carbon-500 dark:text-carbon-400 hover:text-carbon-700">Forgot password?</button></div>
             </>
           )}
-          {mode === 'signup' && <button onClick={() => setMode('login')} className="text-accent hover:underline">Already have an account? Sign in</button>}
-          {(mode === 'reset' || mode === 'reset-confirm') && <button onClick={() => setMode('login')} className="text-accent hover:underline">Back to sign in</button>}
+          {mode === 'signup' && <button type="button" onClick={() => setMode('login')} className="text-accent hover:underline">Already have an account? Sign in</button>}
+          {(mode === 'reset' || mode === 'reset-confirm') && <button type="button" onClick={() => setMode('login')} className="text-accent hover:underline">Back to sign in</button>}
         </div>
       </div>
     </div>
