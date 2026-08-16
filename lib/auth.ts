@@ -3,15 +3,15 @@ import { cookies } from 'next/headers'
 import { NextRequest } from 'next/server'
 import { User } from '@/types'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'carbonai-private-secret-key-change-in-production-2026'
+const JWT_SECRET = process.env.JWT_SECRET || 'carbonai-private-secret-key-change-this-in-production'
 
-// --- PASSWORD HASHING (PBKDF2) ---
+// --- PASSWORD HASHING ---
 
 export async function hashPassword(password: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const salt = crypto.randomBytes(16).toString('hex')
     crypto.pbkdf2(password, salt, 100000, 64, 'sha512', (err, derivedKey) => {
-      if (err) reject(err)
+      if (err) return reject(err)
       resolve(`${salt}:${derivedKey.toString('hex')}`)
     })
   })
@@ -24,12 +24,16 @@ export async function verifyPassword(password: string, storedHash: string): Prom
     const [salt, key] = parts
     crypto.pbkdf2(password, salt, 100000, 64, 'sha512', (err, derivedKey) => {
       if (err) return resolve(false)
-      resolve(crypto.timingSafeEqual(Buffer.from(key, 'hex'), derivedKey))
+      try {
+        resolve(crypto.timingSafeEqual(Buffer.from(key, 'hex'), derivedKey))
+      } catch {
+        resolve(false)
+      }
     })
   })
 }
 
-// --- JWT TOKEN GENERATION & VERIFICATION (HMAC-SHA256) ---
+// --- JWT TOKEN GENERATION & VERIFICATION ---
 
 function base64UrlEncode(str: string): string {
   return Buffer.from(str)
@@ -41,9 +45,7 @@ function base64UrlEncode(str: string): string {
 
 function base64UrlDecode(str: string): string {
   let base64 = str.replace(/-/g, '+').replace(/_/g, '/')
-  while (base64.length % 4) {
-    base64 += '='
-  }
+  while (base64.length % 4) base64 += '='
   return Buffer.from(base64, 'base64').toString('utf8')
 }
 
@@ -57,7 +59,7 @@ export async function createToken(userId: string, email: string): Promise<string
     sub: userId,
     email,
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, // 30 days
+    exp: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
   })
 
   const encodedHeader = base64UrlEncode(header)
@@ -90,11 +92,10 @@ export function verifyToken(token: string): { userId: string; email: string } | 
     if (signature !== expectedSignature) return null
 
     const payload = JSON.parse(base64UrlDecode(encodedPayload))
-    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) {
-      return null
-    }
+    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null
+    if (!payload.sub || !payload.email) return null
 
-    return { userId: payload.sub, email: payload.email }
+    return { userId: String(payload.sub), email: String(payload.email) }
   } catch {
     return null
   }
@@ -134,13 +135,7 @@ export function createUser(data: {
   getDb().runQuery(
     `INSERT INTO users (id, email, password_hash, full_name, verification_token, email_verified)
      VALUES (?, ?, ?, ?, ?, 1)`,
-    [
-      data.id,
-      data.email.toLowerCase().trim(),
-      data.password_hash,
-      data.full_name || null,
-      data.verification_token || null,
-    ]
+    [data.id, data.email.toLowerCase().trim(), data.password_hash, data.full_name || null, data.verification_token || null]
   )
 }
 
@@ -166,20 +161,16 @@ export function verifyUserEmail(token: string): boolean {
 }
 
 export function setResetToken(email: string, token: string, expires: string): void {
-  getDb().runQuery('UPDATE users SET reset_token = ?, reset_expires = ? WHERE email = ?', [
-    token,
-    expires,
-    email.toLowerCase().trim(),
-  ])
+  getDb().runQuery('UPDATE users SET reset_token = ?, reset_expires = ? WHERE email = ?', [token, expires, email.toLowerCase().trim()])
 }
 
 export function resetPassword(token: string, passwordHash: string): boolean {
   const db = getDb()
-  const user = db.queryOne('SELECT id FROM users WHERE reset_token = ?', [token])
+  const user = db.queryOne('SELECT id FROM users WHERE reset_token = ? AND reset_expires > ?', [token, new Date().toISOString()])
   if (!user) return false
 
   db.runQuery(
-    'UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires = NULL WHERE id = ?',
+    'UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires = NULL, updated_at = datetime(\'now\') WHERE id = ?',
     [passwordHash, user.id]
   )
   return true
@@ -188,9 +179,9 @@ export function resetPassword(token: string, passwordHash: string): boolean {
 // --- REQUEST CONTEXT AUTHENTICATION ---
 
 export async function getCurrentUser(req?: Request | NextRequest): Promise<User | null> {
-  try {
-    let token: string | undefined
+  let token: string | undefined
 
+  try {
     if (req) {
       if ('cookies' in req && typeof (req as NextRequest).cookies?.get === 'function') {
         token = (req as NextRequest).cookies.get('auth_token')?.value
@@ -204,57 +195,51 @@ export async function getCurrentUser(req?: Request | NextRequest): Promise<User 
 
       if (!token) {
         const authHeader = req.headers.get('authorization')
-        if (authHeader?.startsWith('Bearer ')) {
-          token = authHeader.substring(7)
-        }
+        if (authHeader?.startsWith('Bearer ')) token = authHeader.substring(7)
       }
     } else {
-      try {
-        const cookieStore = cookies()
-        token = cookieStore.get('auth_token')?.value
-      } catch {}
+      const cookieStore = cookies()
+      token = cookieStore.get('auth_token')?.value
     }
-
-    if (!token) return null
-
-    const payload = verifyToken(token)
-    if (!payload) return null
-
-    if (process.env.NEXT_RUNTIME === 'edge') {
-      return {
-        id: payload.userId,
-        email: payload.email,
-        password_hash: '',
-        personality: 'humanoid',
-        theme: 'system',
-        memory_enabled: 1,
-        email_verified: 1,
-        created_at: '',
-        updated_at: '',
-      } as User
-    }
-
-    const user = getUserById(payload.userId)
-    return user || null
-  } catch {
-    return null
+  } catch (error) {
+    console.error('[auth/cookie]', error)
+    throw new Error('Authentication service unavailable')
   }
+
+  if (!token) return null
+
+  const payload = verifyToken(token)
+  if (!payload) return null
+
+  if (process.env.NEXT_RUNTIME === 'edge') {
+    return {
+      id: payload.userId,
+      email: payload.email,
+      password_hash: '',
+      personality: 'humanoid',
+      theme: 'system',
+      memory_enabled: 1,
+      email_verified: 1,
+      created_at: '',
+      updated_at: '',
+    } as User
+  }
+
+  // Deliberately allow DB errors to bubble up. They are infrastructure failures,
+  // not authentication failures, and /api/auth/me will report them as 503.
+  const user = getUserById(payload.userId)
+  return user || null
 }
 
 export async function requireAuth(req?: Request | NextRequest): Promise<User> {
   const user = await getCurrentUser(req)
-  if (!user) {
-    throw new Error('Unauthorized')
-  }
+  if (!user) throw new Error('Unauthorized')
   return user
 }
 
 // --- EMAIL UTILITY ---
 
 export async function sendEmail(to: string, subject: string, html: string): Promise<void> {
-  if (process.env.SMTP_HOST) {
-    console.log(`[SMTP] Sending email to ${to}: ${subject}`)
-  } else {
-    console.log(`[DEV EMAIL] To: ${to} | Subject: ${subject} | HTML: ${html}`)
-  }
+  if (process.env.SMTP_HOST) console.log(`[SMTP] Sending email to ${to}: ${subject}`)
+  else console.log(`[DEV EMAIL] To: ${to} | Subject: ${subject} | HTML: ${html}`)
 }
