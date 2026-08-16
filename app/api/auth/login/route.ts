@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyPassword, createToken, setAuthCookie, getUserByEmail } from '@/lib/auth'
+import { verifyPassword, createToken, getUserByEmail } from '@/lib/auth'
 
 export const runtime = 'nodejs'
 
 export async function POST(req: NextRequest) {
   try {
-    const { email, password } = await req.json()
+    const body = await req.json().catch(() => null)
+    const email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : ''
+    const password = typeof body?.password === 'string' ? body.password : ''
 
     if (!email || !password) {
       return NextResponse.json({ error: 'Email and password required' }, { status: 400 })
@@ -22,13 +24,30 @@ export async function POST(req: NextRequest) {
     }
 
     const token = await createToken(user.id, user.email)
-    const cookie = setAuthCookie(token)
+    const response = NextResponse.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name ?? null,
+        personality: user.personality || 'humanoid',
+        theme: user.theme || 'system',
+        memory_enabled: Boolean(user.memory_enabled),
+      },
+    })
 
-    return NextResponse.json(
-      { user: { id: user.id, email: user.email, full_name: user.full_name, personality: user.personality, theme: user.theme } },
-      { headers: { 'Set-Cookie': cookie } }
-    )
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || 'Login failed' }, { status: 500 })
+    response.cookies.set({
+      name: 'auth_token',
+      value: token,
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 30 * 24 * 60 * 60,
+    })
+
+    return response
+  } catch (error: unknown) {
+    console.error('[auth/login]', error)
+    return NextResponse.json({ error: 'Login failed. Please try again.' }, { status: 500 })
   }
 }
