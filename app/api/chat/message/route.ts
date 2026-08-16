@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireAuth(req)
     const msg = await req.json()
-    if (!msg?.id || !msg?.chat_id || msg.role !== 'user' || typeof msg?.content !== 'string') {
+    if (!msg?.chat_id || msg.role !== 'user' || typeof msg?.content !== 'string') {
       return NextResponse.json({ error: 'Invalid user message' }, { status: 400 })
     }
 
@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     if (!chat) return NextResponse.json({ error: 'Chat not found' }, { status: 404 })
 
     const message: Message = {
-      id: String(msg.id),
+      id: typeof msg.id === 'string' && msg.id.trim() ? msg.id : crypto.randomUUID(),
       chat_id: chatId,
       user_id: user.id,
       role: 'user',
@@ -30,9 +30,9 @@ export async function POST(req: NextRequest) {
       updated_at: new Date().toISOString(),
     }
 
-    await saveMessage(message)
+    const saved = await saveMessage(message)
     await updateChat(user.id, chatId, {})
-    return NextResponse.json({ message: 'Saved', owner: user.id, chatId })
+    return NextResponse.json({ message: 'Saved', owner: user.id, chatId, id: saved.id })
   } catch (error: any) {
     if (error?.message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     console.error('[chat/message]', error)
